@@ -65,6 +65,18 @@ public class BenchMixin {
 	 *  amount they do differ IS the aliasing. ~0.082 deg per pixel at the default FOV and width. */
 	@Unique private final float rp$yaw = Float.parseFloat(System.getProperty("retroperf.bench.yaw", "0"));
 	@Unique private final boolean rp$gui = Boolean.getBoolean("retroperf.bench.gui");
+	/**
+	 * Pinned pitch, degrees, positive = looking DOWN. Default 32 is the historical vantage and must
+	 * stay the default so existing numbers stay comparable.
+	 *
+	 * <p>NEGATIVE values look up, which is the only way to see the underside of a block whose top
+	 * face overhangs its sides -- cactus, and anything else drawn with an inset side. Looking down
+	 * at such a junction shows the overhang and hides exactly the thing worth inspecting.
+	 */
+	@Unique private final float rp$pitch = Float.parseFloat(System.getProperty("retroperf.bench.pitch", "32"));
+	/** Blocks ahead of the camera to stage {@code bench.props}. Small values put the props close
+	 *  enough that a texture seam is actually resolvable. */
+	@Unique private final int rp$propDist = Integer.getInteger("retroperf.bench.propdist", 20);
 	@Unique private double rp$angle;
 	@Unique private int rp$shotFrame;
 	@Unique private long[] rp$periods;
@@ -103,7 +115,7 @@ public class BenchMixin {
 			int ground = rp$groundY(this.client.world, this.rp$x, this.rp$z);
 			this.rp$eyeY = ground + this.rp$eye;
 			this.client.player.setPositionAndAnglesKeepPrevAngles(
-				this.rp$x + 0.5, this.rp$eyeY, this.rp$z + 0.5, 0.0F, 32.0F);
+				this.rp$x + 0.5, this.rp$eyeY, this.rp$z + 0.5, 0.0F, this.rp$pitch);
 			System.out.println("RETROPERF-BENCH: teleported to " + this.rp$x + "," + (ground + this.rp$eye) + "," + this.rp$z);
 			rp$spawnMobs(ground);
 			rp$stageProps();
@@ -140,7 +152,7 @@ public class BenchMixin {
 			this.client.player.setPosition(px, this.rp$eyeY, pz);
 		} else {
 			this.client.player.yaw = this.client.player.prevYaw = this.rp$yaw;
-			this.client.player.pitch = this.client.player.prevPitch = 32.0F;
+			this.client.player.pitch = this.client.player.prevPitch = this.rp$pitch;
 			this.client.player.setPosition(this.rp$x + 0.5, this.rp$eyeY, this.rp$z + 0.5);
 		}
 		this.client.player.velocityX = this.client.player.velocityY = this.client.player.velocityZ = 0.0;
@@ -219,11 +231,23 @@ public class BenchMixin {
 		if (!Boolean.getBoolean("retroperf.bench.props")) {
 			return;
 		}
-		int pz = this.rp$z + 20;
-		int py = (int) (this.rp$eyeY - 0.625 * 20.0);
+		// Blocks ahead of the camera. 20 is far enough that a one-or-two pixel artifact is a
+		// one-or-two pixel artifact -- fine for "is it there at all", useless for looking AT it.
+		// Drop it to single digits to inspect a texture seam.
+		int dist = this.rp$propDist;
+		int pz = this.rp$z + dist;
+		// Follows the pinned pitch rather than assuming 32 degrees: the platform has to land
+		// where the camera is actually looking, or -Dretroperf.bench.pitch aims at empty sky.
+		int py = (int) (this.rp$eyeY - Math.tan(Math.toRadians(this.rp$pitch)) * dist);
 		for (int dx = -4; dx <= 4; dx++) {
 			for (int dz = -4; dz <= 4; dz++) {
-				this.client.world.setBlock(this.rp$x + dx, py, pz + dz, 12); // sand
+				// SANDSTONE UNDERNEATH, and it is not decoration. The platform hangs in mid-air over
+				// ocean, and sand FALLS: without a supported base the whole platform turned into
+				// falling-block entities during the settle, taking the cacti with it, and the shot
+				// came out with no props in it at all. The surface layer still has to be sand,
+				// because CactusBlock.canGrow requires sand or cactus directly below.
+				this.client.world.setBlock(this.rp$x + dx, py - 1, pz + dz, 24); // sandstone
+				this.client.world.setBlock(this.rp$x + dx, py, pz + dz, 12);     // sand
 			}
 		}
 		// Two columns: one 3 tall, one 2 tall, so both a mid-stack and a top junction are in frame.

@@ -118,7 +118,7 @@ public final class Surface implements AutoCloseable {
 
 		MemorySegment caps = WGPUSurfaceCapabilities.allocate(arena);
 		wgpuSurfaceGetCapabilities(surface, ctx.adapter(), caps);
-		this.format = firstOr(WGPUSurfaceCapabilities.formats(caps),
+		this.format = preferredColorFormat(WGPUSurfaceCapabilities.formats(caps),
 			WGPUSurfaceCapabilities.formatCount(caps), WGPUTextureFormat_BGRA8Unorm());
 		// OPAQUE if the surface offers it, because a game window is not a compositing layer. Under
 		// premultiplied alpha -- which is what CAMetalLayer reports first on macOS -- a frame whose
@@ -155,11 +155,42 @@ public final class Surface implements AutoCloseable {
 		outdated = false;
 	}
 
-	private static int firstOr(MemorySegment array, long count, int fallback) {
+	/**
+	 * The first advertised format with four 8-bit UNORM channels, or the surface's own first choice
+	 * when it offers none.
+	 *
+	 * <p><b>Not simply {@code formats[0]}.</b> That is the surface's preferred format, and on
+	 * Linux/Wayland with RADV the preferred format is {@code RGB10A2Unorm} -- 54 formats advertised,
+	 * cycling {@code 30 23 22 28 27 40}, with the packed 10-bit one first. Rendering into it looks
+	 * correct on screen, because the compositor knows the layout. Every CPU-side reader of the frame
+	 * does not: {@code Readback}, {@code WebGpuRenderer.readPixels}, {@code screenshot} and
+	 * {@code Readback.pixel} all decode four independent bytes per pixel, which for a packed
+	 * {@code A:2 B:10 G:10 R:10} word gives structurally perfect, wildly miscoloured output -- the
+	 * stride is 4 bytes either way, so geometry, rows and the GL flip all survive and only the colour
+	 * is nonsense. That made every screenshot and every appearance A/B unusable while the game itself
+	 * looked fine, which is a genuinely misleading way to lose a whole diagnostic path.
+	 *
+	 * <p>sRGB variants are deliberately NOT accepted. They are 8-bit, but the hardware would apply
+	 * the sRGB encode on write and beta's colours are authored for a linear UNORM target.
+	 *
+	 * <p>The 2-bit alpha was a second, quieter consequence: {@code alphaMode} is Opaque so nothing
+	 * composited wrong, but any alpha the frame wrote was quantised to four levels.
+	 */
+	private static int preferredColorFormat(MemorySegment array, long count, int fallback) {
 		if (count <= 0 || array.equals(MemorySegment.NULL)) {
 			return fallback;
 		}
-		return array.reinterpret(count * 4L).getAtIndex(ValueLayout.JAVA_INT, 0);
+		MemorySegment values = array.reinterpret(count * 4L);
+		for (long i = 0; i < count; i++) {
+			int candidate = values.getAtIndex(ValueLayout.JAVA_INT, i);
+			if (candidate == WGPUTextureFormat_BGRA8Unorm()
+					|| candidate == WGPUTextureFormat_RGBA8Unorm()) {
+				return candidate;
+			}
+		}
+		// No 8-bit UNORM at all. Take the surface's preference and let the readback be wrong rather
+		// than fail to configure: the game rendering is worth more than the screenshots.
+		return values.getAtIndex(ValueLayout.JAVA_INT, 0);
 	}
 
 	/**
