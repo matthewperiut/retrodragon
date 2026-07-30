@@ -1,0 +1,45 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.periut.retrodragon.window.mixin",
+  "plugin": "com.periut.retrodragon.window.lwjgl3compat.Lwjgl3MixinPostProcessor",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "retrocenter.PacketRegistryInvoker"
+  ],
+  "server": [
+    "retrocenter.ServerLoginHandlerSyncMixin"
+  ],
+  "client": [
+    "MinecraftAppletMixin",
+    "MinecraftMixin",
+    "MouseHelperMixin",
+    "lwjgl3.GL11Mixin",
+    "lwjgl3.GL20Mixin",
+    "lwjgl3.ALMixin",
+    "lwjgl3.AL10Mixin",
+    "lwjgl3.ARBOcclusionQueryMixin",
+    "lwjgl3.ARBShaderObjectsMixin",
+    "lwjgl3.GLCapabilitiesMixin",
+    "lwjgl3.LibraryLWJGLOpenALMixin",
+    "lwjgl3.MinecraftAccessor",
+    "lwjgl3.MixinMinecraftDrawVirtualCursor",
+    "lwjgl3.MixinResourceDownloadThread",
+    "lwjgl3.MixinScreenFixClipboard",
+    "stapi.MixinMinecraftStapiCleanup",
+    "stapi.MixinMinecraftStapiCompat",
+    "stapi.MixinReloadScreenManager",
+    "stapi.ReloadScreenManagerAccessor",
+    "stapi.ReloadScreenMixin",
+    "retrocenter.TitleScreenChildMixin",
+    "retrocenter.DisconnectedScreenChildMixin",
+    "retrocenter.MinecraftStopExitMixin",
+    "retrocenter.MinecraftChildDirsMixin",
+    "retrocenter.ConnectScreenChildMixin",
+    "retrocenter.GameMenuChildMixin",
+    "retrocenter.ClientNetworkHandlerProbeMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

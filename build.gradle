@@ -1,0 +1,546 @@
+plugins {
+	// java-library, not java: the LWJGL 3 modules are exposed with `api` so the BOM's
+	// constraints reach every consumer of the merged source set.
+	id 'java-library'
+	id 'net.fabricmc.fabric-loom-remap' version '1.16.3'
+	id 'ploceus' version '1.16.1'
+	// Also builds a babric variant (build/libs/<name>-babric.jar).
+	id 'com.periut.retroconvert' version "${retroconvert_version}"
+}
+
+base {
+	archivesName = project.archives_base_name
+}
+version = "${project.version}+mc${project.minecraft_version}"
+group = project.maven_group
+
+ploceus {
+	setIntermediaryGeneration(2)
+}
+
+def lwjglVersion = project.lwjgl_version
+// Dawn (WebGPU) natives, published by jWebGPU. Decoupled from this project's version on purpose.
+ext.dawnVersion = project.findProperty('dawn_version') ?: '0.3.4'
+
+loom {
+	accessWidenerPath = file("src/main/resources/retrodragon.accessWidener")
+}
+
+// ---------------------------------------------------------------------------------------------
+// StationAPI compile stubs
+//
+// The four mixins under window/mixin/stapi need StationAPI TYPES to compile, and nothing else: they
+// are gated at runtime by Lwjgl3MixinPostProcessor.shouldApplyMixin and never load unless the real
+// mod is present. Paying for the real artifact to get those types costs 129 MB and ~86 seconds on a
+// cold cache -- once per CI cache lifetime, but also once per fresh clone, per developer.
+//
+// So the default build compiles against signature-only stubs in src/stapiStub. `-Pstapi=real` swaps
+// them for the genuine dependency, which is how a signature that has drifted gets caught; run it
+// after a StationAPI bump.
+//
+// The stubs are a separate source set precisely so they cannot leak: their output goes on the main
+// COMPILE classpath and nowhere else -- not the runtime classpath, not the jar. verifyNoStubsInJar
+// enforces the "not the jar" half, because a shipped stub would shadow the real StationAPI.
+def useRealStapi = (project.findProperty('stapi') ?: 'stub') == 'real'
+
+sourceSets {
+	stapiStub
+}
+
+// configurations.compileClasspath rather than sourceSets.main.compileClasspath: main's classpath is
+// about to have this source set's output added to it, and referring to it here would be a cycle.
+// The stubs need only Minecraft's own types (Tessellator, Timer), which come from the configuration.
+tasks.named('compileStapiStubJava') {
+	classpath = configurations.compileClasspath
+}
+
+if (!useRealStapi) {
+	sourceSets.main.compileClasspath += sourceSets.stapiStub.output
+	tasks.named('compileJava') { dependsOn tasks.named('stapiStubClasses') }
+}
+
+repositories {
+	mavenLocal()
+	mavenCentral()
+	maven { url = 'https://maven.glass-launcher.net/releases/' } // biny
+	maven { url = 'https://maven.glass-launcher.net/snapshots/' }
+	maven { url = 'https://mvn.devos.one/releases' }             // StationAPI
+	// RetroAPI. Only ever resolved by stageRapiMods -- see "content API dev runs".
+	maven { url = 'https://matthewperiut.github.io/repository' }
+	maven { url = 'https://maven.wispforest.io' }
+	maven { url = 'https://maven.minecraftforge.net/' }
+	maven { url = 'https://jitpack.io/' }
+	exclusiveContent {
+		forRepository {
+			maven { url = 'https://api.modrinth.com/maven' }
+		}
+		filter {
+			includeGroup('maven.modrinth')
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	mappings ploceus.mappings("net.glasslauncher:biny-ornithe:b1.7.3+build.${project.biny_mappings}:mergedv2")
+
+	clientExceptions ploceus.raven(project.client_raven_build, 'client')
+	serverExceptions ploceus.raven(project.server_raven_build, 'server')
+	clientSignatures ploceus.sparrow(project.client_sparrow_build, 'client')
+	serverSignatures ploceus.sparrow(project.server_sparrow_build, 'server')
+	clientNests "net.glasslauncher:biny-nests:b1.7.3-client+build.${project.biny_nests_build}"
+	serverNests "net.glasslauncher:biny-nests:b1.7.3-server+build.${project.biny_nests_build}"
+
+	ploceus.dependOsl(project.osl_version)
+
+	// Bundled with fabric-loader at runtime; compile-time only here.
+	compileOnly 'io.github.llamalad7:mixinextras-fabric:0.4.1'
+
+	// ---------------------------------------------------------------------------------------
+	// LWJGL 3. The in-tree org.lwjgl.* sources are an LWJGL 2 API surface implemented on top of
+	// LWJGL 3 (SDL3 by default, GLFW as fallback), so LWJGL 3 is both a compile and a runtime
+	// dependency and every native has to be nested (JiJ) for a production install.
+	// ---------------------------------------------------------------------------------------
+	api platform("org.lwjgl:lwjgl-bom:${lwjglVersion}")
+	include platform("org.lwjgl:lwjgl-bom:${lwjglVersion}")
+
+	['linux', 'windows', 'macos', 'windows-arm64', 'macos-arm64', 'linux-arm64'].each { platform ->
+		include runtimeOnly("org.lwjgl:lwjgl::natives-${platform}")
+		include runtimeOnly("org.lwjgl:lwjgl-glfw::natives-${platform}")
+		include runtimeOnly("org.lwjgl:lwjgl-openal::natives-${platform}")
+		include runtimeOnly("org.lwjgl:lwjgl-opengl::natives-${platform}")
+		include runtimeOnly("org.lwjgl:lwjgl-sdl::natives-${platform}")
+	}
+
+	include api("org.lwjgl:lwjgl:${lwjglVersion}")
+	include api("org.lwjgl:lwjgl-glfw:${lwjglVersion}")
+	include api("org.lwjgl:lwjgl-openal:${lwjglVersion}")
+	// SDL3: the replacement for GLFW as window/context/input backend. Verified to give a GL 4.6
+	// COMPATIBILITY context (which beta's fixed-function rendering requires) plus the native
+	// Wayland/Metal/Win32/Xlib handles a WebGPU surface is created from.
+	include api("org.lwjgl:lwjgl-sdl:${lwjglVersion}")
+	include api("org.lwjgl:lwjgl-opengl:${lwjglVersion}")
+
+	// ---------------------------------------------------------------------------------------
+	// StationAPI: COMPILE ONLY. It is deliberately absent from every runtime classpath.
+	//
+	// RetroDragon is a rendering mod and has to work with either content API, both, or neither --
+	// so it must not LOAD one. What it does carry is compat: the four mixins under
+	// window/mixin/stapi that graft StationAPI's reload screen onto the SDL3 window, applied at
+	// runtime only when `stationapi` is really present (Lwjgl3MixinPostProcessor.shouldApplyMixin).
+	// Those four @Overwrite and @Shadow StationAPI's own types, so they need it on the COMPILE
+	// classpath and nowhere else. `./gradlew runClient` therefore starts a game with no content
+	// API in it at all.
+	//
+	// To run WITH one: ./gradlew runClientStapi or ./gradlew runClientRapi. Each fetches the mod
+	// when the run task executes and installs it for that run only -- see "content API dev runs".
+	// Stubs by default, the real artifact behind -Pstapi=real. See src/stapiStub and
+	// "StationAPI compile stubs" below.
+	if (useRealStapi) {
+		modCompileOnly(retroconvert.localize("net.modificationstation:StationAPI:${project.stationapi_version}"))
+	}
+	// The stub output is attached to main's compileClasspath below, NOT via compileOnly: compileOnly
+	// feeds configurations.compileClasspath, which is what the stubs themselves compile against, and
+	// that is a cycle.
+	// Ornithe's b1.7.3 library list pins guava 17, but StationAPI (built against
+	// babric's modern runtime) needs guava >= 21; b1.7.3 itself doesn't use guava. Compile scope
+	// because the stapi compat mixins use it too; it is what runClientStapi needs at runtime.
+	implementation 'com.google.guava:guava:33.4.8-jre'
+	// Also absent from the ornithe b1.7.3 runtime but expected by StationAPI.
+	runtimeOnly 'org.apache.commons:commons-lang3:3.14.0'
+
+	// ---------------------------------------------------------------------------------------
+	// WebGPU via Dawn. com.periut.retrodragon.gpu owns every FFM call; com.periut.webgpu is the
+	// jextract output. WebGPUNatives extracts native/dawn/<lib> from the classpath, so the four
+	// platform jars must be BOTH on the dev runtime classpath AND nested in the shipped jar --
+	// loom's `include` does not follow transitives and these are plain libraries, not mods.
+	// ---------------------------------------------------------------------------------------
+	['windows_x64', 'linux_x64', 'mac_x64', 'mac_arm64'].each { platform ->
+		include runtimeOnly("com.github.xpenatan.jWebGPU:webgpu-desktop-jni-dawn_${platform}:${dawnVersion}")
+	}
+}
+
+// Every Dawn jar drags in com.github.xpenatan.jParser:runtime-desktop-jni_*, whose natives sit at
+// the JAR ROOT (libruntime64.so, runtime64.dll, ...). Nothing here loads them and root-level
+// natives are exactly what collides once several jars are merged or nested.
+configurations.configureEach {
+	exclude group: 'com.github.xpenatan.jParser'
+}
+
+// LWJGL 2 (group org.lwjgl.lwjgl) must not be on the runtime OR compile classpath -- the in-tree
+// org.lwjgl.* sources supply that API themselves. It must stay on minecraftCompileLibraries
+// though: Condor (Ploceus LVT generator) needs to resolve org.lwjgl.* referenced by vanilla
+// b1.7.3, so this is deliberately NOT a blanket configurations.configureEach exclude.
+configurations.matching {
+	it.name.toLowerCase().contains('runtime') || it.name == 'compileClasspath'
+}.configureEach {
+	exclude group: 'org.lwjgl.lwjgl'
+}
+
+processResources {
+	inputs.property 'version', version
+
+	filesMatching('fabric.mod.json') {
+		expand 'version': version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.encoding = 'UTF-8'
+	// 25, not 21: the gpu package's public API is FFM-based (java.lang.foreign), final only from 22.
+	it.options.release = 25
+	// The 497 machine-generated jextract files in com.periut.webgpu produce >1100 [restricted]
+	// warnings; without this any future -Xlint on the hand-written code is buried under them.
+	it.options.compilerArgs << '-nowarn'
+}
+
+java {
+	toolchain { languageVersion = JavaLanguageVersion.of(25) }
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+	withSourcesJar()
+}
+
+// The LWJGL-2-derived org.lwjgl.* sources are LGPL-2.1 / BSD; both licence texts ship in the jar.
+tasks.withType(Jar).configureEach {
+	from("LICENSE") {
+		rename { "${it}_${project.archives_base_name}" }
+	}
+	from("LICENSE.LGPL") {
+		rename { "${it}_${project.archives_base_name}" }
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// RetroCenter childshim.
+//
+// RetroDragon minus org/lwjgl/** and the bundled natives: what an in-process CHILD instance loads
+// as a mod. The child's classloader shares org.lwjgl with the hub (one window, one set of JNI
+// natives -- a native can bind to only one classloader per JVM), so the child's copy of this mod
+// must not carry its own. See ChildClassLoader / InProcessChildLauncher.
+// ---------------------------------------------------------------------------------------------
+tasks.register('childShimJar', Jar) {
+	dependsOn tasks.named('classes'), tasks.named('processResources')
+	from sourceSets.main.output
+	exclude 'org/lwjgl/**'
+	exclude 'natives/**'
+	// The bridge MUST resolve to the hub's single copy via parent delegation -- a child-local copy
+	// would have its own (empty) statics and the window handoff would deadlock on first use.
+	exclude 'com/periut/retrodragon/retrocenter/bridge/**'
+	// Same rule as org/lwjgl/**, for the same reason: WebGPUNatives does System.load(Dawn), and a
+	// JNI/FFM native library can be loaded by exactly ONE classloader per JVM. A child booted with
+	// -Dretroperf.backend=webgpu would otherwise define its own copy of these classes and die with
+	// "Native library ... already loaded in another classloader". Left out of the shim, the child's
+	// Knot finds no class resource for them and falls through to the hub's single copy (see
+	// ChildClassLoader.loadClass / the patched KnotClassDelegate parent fallback).
+	exclude 'com/periut/webgpu/**'
+	exclude 'com/periut/retrodragon/gpu/**'
+	archiveClassifier = 'childshim'
+}
+
+// The shim must match the runtime's mappings: production runs intermediary, so it gets its own
+// remap pass. Untyped wiring on purpose -- loom's task classes live in a different plugin
+// classloader, so typed named() lookups reject them.
+def childShimName = "${project.archives_base_name}-${project.version}-childshim"
+tasks.register('remapChildShimJar', net.fabricmc.loom.task.RemapJarTask) {
+	dependsOn tasks.named('childShimJar')
+	inputFile.set(layout.buildDirectory.file("libs/${childShimName}.jar"))
+	archiveClassifier.set('childshim-intermediary')
+	// No jar-in-jar: the child must NOT get its own LWJGL or its own Dawn natives, both of which
+	// are nested into the main jar and both of which are shared with the hub.
+	addNestedDependencies.set(false)
+}
+
+// ...and is embedded INSIDE the distributed jar at retrocenter/childshim.jar --
+// ServerProfiles.extractEmbeddedShim() self-extracts it at runtime, no manual install step.
+tasks.named('remapJar') {
+	dependsOn tasks.named('remapChildShimJar')
+	from(layout.buildDirectory.file("libs/${childShimName}-intermediary.jar")) {
+		into 'retrocenter'
+		rename { 'childshim.jar' }
+	}
+}
+
+// Dev runs use NAMED mappings, so point child launches straight at the un-remapped shim. The run
+// tasks depend on childShimJar (see below), so it is built and up to date before a run starts.
+// Production falls back to the embedded copy above.
+loom {
+	runs {
+		configureEach {
+			vmArg "-Dretrocenter.childShimJar=${layout.buildDirectory.get().asFile}/libs/${childShimName}.jar"
+		}
+	}
+}
+
+tasks.named('build') { dependsOn 'childShimJar', 'remapChildShimJar' }
+
+// ---------------------------------------------------------------------------------------------
+// Content API dev runs: ./gradlew runClientStapi, ./gradlew runClientRapi
+//
+// b1.7.3 has two content APIs and a rendering mod has to survive both, so both need to be one
+// command away -- without either becoming a dependency of this project.
+//
+// Each run is a normal client run plus ONE installed content API. The mod jar is fetched,
+// babric->ornithe converted if it needs it, and staged under build/contentApis/<id>; the run then
+// points Fabric Loader at that directory with -Dfabric.addMods. Loader treats it exactly as it
+// treats a jar in a mods folder, dev-time intermediary->named remap included, so what gets
+// exercised is the SHIPPED mod rather than a source dependency, and nested (JiJ) modules are
+// unpacked by loader the same way they are for a player.
+//
+// Nothing here resolves unless one of these tasks runs. `retroconvert.localize()` resolves eagerly
+// when called, so it is called from inside a lazy FileCollection instead: the download happens when
+// the staging task EXECUTES, which is to say on `runClientStapi` / `runClientRapi` and never on
+// `build`, `runClient` or a bare configuration pass.
+//
+// ONE run directory for all three configurations, so options.txt, saves/ and screenshots/ are
+// wherever they were last time regardless of which task launched the game.
+//
+// The cost is real and worth knowing: a save created under StationAPI or RetroAPI has block IDs
+// from a registry that plain `runClient` does not load, so opening it there gives back a world with
+// holes in it. That is not corruption of the save, and it comes back if the same task reopens it,
+// but the fix is to keep separate WORLDS rather than separate run directories -- which is also the
+// only version of this that survives someone launching from a normal Minecraft launcher.
+def contentApis = [
+	stapi: [
+		label : 'StationAPI',
+		// The one dependency this project no longer has at runtime.
+		coords: ["net.modificationstation:StationAPI:${project.stationapi_version}"],
+	],
+	rapi : [
+		label : 'RetroAPI',
+		// Fetched WITHOUT its transitives (localize() resolves non-transitively), which is what is
+		// wanted: retroapi's pom asks for starac -- an LWJGL 3 layer this mod replaces outright --
+		// and for OSL gen2 modules that are already on this project's runtime classpath.
+		coords: ["com.periut:retroapi:${project.retroapi_version}"],
+	],
+]
+
+contentApis.each { id, spec ->
+	def suffix = id.capitalize()
+	def stagingDir = layout.buildDirectory.dir("contentApis/${id}")
+
+	def stage = tasks.register("stage${suffix}Mods", Sync) {
+		group = 'fabric'
+		description = "Fetches ${spec.label} and stages it as an installed mod for runClient${suffix}."
+		// Task-owned directory, hence Sync: a version bump must not leave the old jar behind to be
+		// loaded alongside the new one.
+		into stagingDir
+		from(files({
+			spec.coords.collectMany { coords ->
+				// localize() hands back the converted umbrella jar AND the nested mods it extracted
+				// for use as a compile classpath. Only the umbrella belongs in a mods directory --
+				// loader unpacks META-INF/jars itself, so staging both would offer every module
+				// twice and fail discovery on the duplicate.
+				retroconvert.localize(coords).files.findAll { !it.parentFile.name.endsWith('-jij') }
+			}
+		}))
+	}
+
+	loom.runs.create("client${suffix}") { run ->
+		run.client()
+		run.configName = "Minecraft Client (${spec.label})"
+		// The same directory plain runClient uses; see the note above contentApis.
+		run.runDir 'run'
+		run.vmArg "-Dfabric.addMods=${stagingDir.get().asFile}"
+	}
+
+	tasks.named("runClient${suffix}") { dependsOn stage }
+}
+
+// The -D properties a Gradle invocation forwards to the JVM it spawns.
+//
+// All four module prefixes, not just one. Filtering on "retroperf." alone silently dropped
+// -Dretrowindow.sdl=false, so choosing the GLFW window over SDL3 from the command line looked like
+// it did nothing -- the run just came up on SDL3 anyway. A flag that is quietly discarded is worse
+// than one that is rejected. The three legacy prefixes are the property KEYS the code still reads;
+// retrodragon. is here for anything added after the merge.
+//
+// A plain local closure, NOT ext.forwarded: inside a task configuration block `ext` is the TASK's
+// extra properties, so project-level ext is not visible there. A local is captured lexically and
+// resolves the same everywhere in this file.
+def forwarded = { key ->
+	String name = key.toString()
+	return name.startsWith('retroperf.') || name.startsWith('retrowindow.')
+		|| name.startsWith('retrogpu.') || name.startsWith('retrodragon.')
+		// RetroCenter's own keys (packetId, child, childShimJar) -- same reasoning as the four
+		// above: -Dretrocenter.packetId=231 on the Gradle command line has to reach the game.
+		|| name.startsWith('retrocenter.')
+}
+
+// Standalone WebGPU checks. They run the renderer without the game, which is the only way to
+// exercise the surface path -- a WebGPU surface needs a window with no GL context, and beta's own
+// launch path always makes one with a context until the backend gate lifts.
+def macOs = System.getProperty('os.name', '').toLowerCase().contains('mac')
+
+tasks.register('webgpuWindow', JavaExec) {
+	group = 'verification'
+	description = 'Opens a GL-free SDL3 window and clears it through WebGPU.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.render.WebGpuWindowTest'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	if (macOs) {
+		// SDL3's Cocoa backend only comes up on the process's first thread.
+		jvmArgs '-XstartOnFirstThread'
+	}
+	// Pass -Dretroperf.* through from the Gradle invocation, so -Dretroperf.frames=60 works.
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+// -Dretroperf.* on the Gradle command line reaches the game, so a backend can be selected without
+// editing a run configuration: ./gradlew runClient -Dretroperf.backend=webgpu
+tasks.withType(JavaExec).matching { it.name.startsWith('run') }.configureEach {
+	// The -Dretrocenter.childShimJar vmArg above points every run at build/libs/...-childshim.jar,
+	// but only `build` used to produce it. A run against a clean tree therefore launched children
+	// with NO RetroDragon in them (no MinecraftStopExitMixin -> leaving the child System.exit()s the
+	// whole JVM, hub included), and a run after an edit silently reused the previous build's shim.
+	// Only childShimJar: dev runs use NAMED mappings, so the remapped variants stay on `build`.
+	dependsOn 'childShimJar'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+// Pure-CPU self-checks. They need the Minecraft classpath only because the classes they live in
+// reference it; nothing here touches a GPU or a window, so they are always safe to run.
+['com.periut.retrodragon.shim.PipelineKey'  : 'pipelineKeyTest',
+ 'com.periut.retrodragon.shim.GlShim'       : 'glShimTest',
+ 'com.periut.retrodragon.shim.GlState'      : 'glStateTest',
+ 'com.periut.retrodragon.render.OcclusionCuller': 'occlusionTest',
+ 'com.periut.retrodragon.render.BlockAtlas'    : 'blockAtlasTest',
+ 'com.periut.retrodragon.render.ArenaAllocator': 'arenaTest',
+ 'com.periut.retrodragon.render.VertexSink'    : 'vertexSinkTest',
+ 'com.periut.retrodragon.shim.GlCoverage'      : 'glCoverage',
+ 'com.periut.retrodragon.render.LineExpander'  : 'lineExpanderTest'].each { mainName, taskName ->
+	tasks.register(taskName, JavaExec) {
+		group = 'verification'
+		description = "Self-check for ${mainName.tokenize('.').last()}."
+		classpath = sourceSets.main.runtimeClasspath
+		mainClass = mainName
+	}
+}
+
+// Static invariant: no raw GLFW call may consume Display.getHandle().
+//
+// On the DEFAULT backend that handle is an SDL_Window* and GLFW is never initialized, so every
+// org.lwjgl.glfw entry point silently early-returns on _GLFW_REQUIRE_INIT -- no exception, no error
+// callback, just a feature that does nothing. That is exactly how the StationAPI early loading
+// screen (glfwSwapBuffers/glfwWindowShouldClose) and clipboard copy/paste (glfwGet/SetClipboardString)
+// were broken. Both now go through Display, which branches per backend. This is checked against the
+// COMPILED classes rather than the sources because the game must not be launched to verify it, and a
+// constant-pool scan cannot be fooled by a comment or a wildcard import.
+tasks.register('noRawGlfwCheck') {
+	group = 'verification'
+	description = 'Asserts the backend-agnostic window callers carry no org.lwjgl.glfw reference.'
+	dependsOn tasks.named('classes')
+	def classesDir = layout.buildDirectory.dir('classes/java/main')
+	def guarded = [
+		'org/lwjgl/opengl/EarlyRenderLoop.class',
+		'com/periut/retrodragon/window/mixin/lwjgl3/MixinScreenFixClipboard.class',
+	]
+	// Always run: it is a millisecond of byte scanning and it must never be skipped as up to date.
+	outputs.upToDateWhen { false }
+	doLast {
+		byte[] needle = 'org/lwjgl/glfw/GLFW'.getBytes('UTF-8')
+		def root = classesDir.get().asFile
+		guarded.each { entry ->
+			File f = new File(root, entry)
+			if (!f.isFile()) {
+				throw new GradleException("noRawGlfwCheck: ${entry} was not compiled -- did it move? " +
+					"Update the guarded list in build.gradle.")
+			}
+			byte[] bytes = f.bytes
+			boolean hit = (0..(bytes.length - needle.length)).any { int i ->
+				(0..<needle.length).every { int j -> bytes[i + j] == needle[j] }
+			}
+			if (hit) {
+				throw new GradleException("noRawGlfwCheck: ${entry} references org.lwjgl.glfw.GLFW. " +
+					"It runs on the SDL3 backend too, where raw GLFW calls are silent no-ops -- " +
+					"go through org.lwjgl.opengl.Display instead.")
+			}
+		}
+	}
+}
+
+tasks.register('selfChecks') {
+	group = 'verification'
+	description = 'Every CPU-side self-check.'
+	dependsOn 'pipelineKeyTest', 'glShimTest', 'glStateTest', 'occlusionTest', 'arenaTest',
+		'vertexSinkTest', 'glCoverage', 'lineExpanderTest', 'blockAtlasTest', 'noRawGlfwCheck'
+}
+
+// The Dawn bring-up check that used to live in retrogpu as ':retrogpu:smokeTest'.
+tasks.register('smokeTest', JavaExec) {
+	group = 'verification'
+	description = 'Dawn bring-up: instance -> adapter -> device -> WGSL -> 64x64 offscreen draw.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.gpu.WebGPUSmokeTest'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+tasks.register('webgpuStress', JavaExec) {
+	group = 'verification'
+	description = 'Drives the frame shapes a world load produces, offscreen, and requires a clean device.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.render.WebGpuStressTest'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+tasks.register('webgpuBench', JavaExec) {
+	group = 'verification'
+	description = 'Offscreen throughput for a terrain-shaped frame; no window, safe to leave running.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.render.WebGpuBench'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+tasks.register('featureProbe', JavaExec) {
+	group = 'verification'
+	description = 'Lists every WebGPU feature the adapter advertises.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.gpu.FeatureProbe'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+tasks.register('webgpuDraw', JavaExec) {
+	group = 'verification'
+	description = 'Renders beta-format geometry through the fixed-function WGSL pipeline, offscreen.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.render.WebGpuDrawTest'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+// A stub that reached a shipped jar would sit on the classpath ahead of the real StationAPI and
+// break every mod that uses it, in a way that would look like StationAPI itself was broken. The
+// source-set split already prevents it; this makes sure a future change to the jar tasks cannot
+// quietly undo that.
+def verifyNoStubsInJar = tasks.register('verifyNoStubsInJar') {
+	group = 'verification'
+	description = 'Fails if any net/modificationstation class is present in an output jar.'
+	def jarFiles = layout.buildDirectory.dir('libs')
+	doLast {
+		def offenders = []
+		jarFiles.get().asFile.listFiles()?.findAll { it.name.endsWith('.jar') }?.each { file ->
+			new java.util.zip.ZipFile(file).withCloseable { zip ->
+				if (zip.entries().any { it.name.startsWith('net/modificationstation/') }) {
+					offenders << file.name
+				}
+			}
+		}
+		if (offenders) {
+			throw new GradleException("StationAPI compile stubs leaked into: ${offenders.join(', ')}."
+				+ " They must never ship -- see src/stapiStub/java/net/modificationstation/README.md")
+		}
+	}
+}
+
+tasks.named('check') {
+	dependsOn verifyNoStubsInJar
+}
+tasks.named('verifyNoStubsInJar') {
+	dependsOn tasks.named('assemble')
+}

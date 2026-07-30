@@ -1,0 +1,39 @@
+{
+	"schemaVersion": 1,
+	"id": "retrodragon",
+	"version": "${version}",
+	"name": "RetroDragon",
+	"description": "Rebuilds Minecraft Beta 1.7.3's client stack: SDL3 windowing, input and context in place of LWJGL 2, a faster rendering backend with an optional WebGPU (Dawn) path, and native window/titlebar theming.",
+	"authors": [
+		"Slainlight"
+	],
+	"license": [
+		"MIT",
+		"LGPL-2.1-only"
+	],
+	"icon": "assets/retrodragon/icon.png",
+	"environment": "client",
+	"accessWidener": "retrodragon.accessWidener",
+	"entrypoints": {
+		"preLaunch": [
+			"com.periut.retrodragon.window.RetroWindowPreLaunch",
+			"com.periut.retrodragon.RetroDragonPreLaunch"
+		],
+		"init": [
+			"com.periut.retrodragon.RetroDragon"
+		],
+		"main": [
+			"com.periut.retrodragon.retrocenter.RetroCenterMain"
+		]
+	},
+	"mixins": [
+		"retrodragon.mixins.json",
+		"retrodragon-window.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "1.0.0-beta.7.3",
+		"osl-entrypoints": ">=0.4.0",
+		"java": ">=25"
+	}
+}

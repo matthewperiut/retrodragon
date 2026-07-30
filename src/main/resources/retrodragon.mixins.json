@@ -1,0 +1,30 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.periut.retrodragon.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "com.periut.retrodragon.mixin.GlPlugin",
+  "mixins": [],
+  "client": [
+    "BenchMixin",
+    "ChunkBuilderMixin",
+    "TessellatorMixin",
+    "WorldRendererMixin",
+    "Vec3dCacheMixin",
+    "WorldRegionBiomeMixin",
+    "BlockBoundsLockMixin",
+    "WorldCollisionLockMixin",
+    "FocusMixin",
+    "AntiAliasMixin",
+    "MipmapCompletenessMixin",
+    "FogModeMixin",
+    "GlOwnershipMixin",
+    "TextRendererMixin",
+    "MinecraftAccessor",
+    "FrameTimerMixin"
+  ],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

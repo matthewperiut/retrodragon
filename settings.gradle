@@ -1,0 +1,27 @@
+pluginManagement {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		maven {
+			name = 'Ornithe Releases'
+			url = 'https://maven.ornithemc.net/releases'
+		}
+		maven {
+			name = 'Ornithe Snapshots'
+			url = 'https://maven.ornithemc.net/snapshots'
+		}
+		// RetroAPI repository -- hosts the com.periut.retroconvert plugin. (It also hosts starac,
+		// but RetroDragon no longer depends on it: starac's features are in-tree.)
+		maven {
+			name = 'RetroAPI'
+			url = 'https://matthewperiut.github.io/repository'
+		}
+		mavenCentral()
+		mavenLocal()
+		gradlePluginPortal()
+	}
+}
+
+rootProject.name = 'retrodragon'

@@ -1,0 +1,142 @@
+# Generic release publishing - drop this .github into any mod laid out like bare-retroapi-template.
+#
+# What it does on every published GitHub Release (or manual dispatch):
+#   1. Builds the mod (`./gradlew build`). This fetches neither content API -- see check.yml.
+#   2. Detects the mod's coordinates generically:
+#        * jar base name   <- `archives_base_name` in gradle.properties
+#        * full version    <- the resolved Gradle `version` (handles build.gradle composing
+#                             version = "${version}+mc${minecraft_version}" etc.)
+#        * game version    <- `minecraft_version` in gradle.properties
+#        * babric variant  <- build/libs/<base>-<version>-babric.jar, if the retroconvert
+#                             plugin produced one
+#   3. Attaches the jar(s) to the GitHub Release (always - no configuration needed).
+#   4. TRIES to publish to Modrinth: only if BOTH the `MODRINTH_TOKEN` secret and the
+#      `MODRINTH_ID` repository variable are set. If either is missing the Modrinth steps
+#      are skipped with a notice - GitHub publishing still happens.
+#
+# Optional configuration:
+#   * secret   MODRINTH_TOKEN - a Modrinth PAT with write scope
+#   * variable MODRINTH_ID    - the mod's Modrinth project id or slug
+#
+# The workflow must exist on the default branch for the release event to pick it up.
+name: Publish
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # A release build must not write the shared cache; it reads what check.yml warmed.
+          cache-read-only: true
+
+      - name: Build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build --stacktrace
+
+      - name: Resolve mod coordinates
+        id: mod
+        run: |
+          version=$(./gradlew properties -q --console=plain | awk -F': ' '$1 == "version" { print $2; exit }')
+          base=$(sed -nE 's/^[[:space:]]*archives_base_name[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
+          mc=$(sed -nE 's/^[[:space:]]*minecraft_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
+          main_jar="build/libs/${base}-${version}.jar"
+          if [ ! -f "$main_jar" ]; then
+            echo "::error::expected mod jar not found: $main_jar (archives_base_name=$base, version=$version)"
+            exit 1
+          fi
+          babric_jar="build/libs/${base}-${version}-babric.jar"
+          [ -f "$babric_jar" ] || babric_jar=""
+          # version-type for Modrinth, derived from the version string itself
+          case "$version" in
+            *alpha*) vtype=alpha ;;
+            *beta*)  vtype=beta ;;
+            *)       vtype=release ;;
+          esac
+          {
+            echo "version=$version"
+            echo "base=$base"
+            echo "minecraft_version=$mc"
+            echo "main_jar=$main_jar"
+            echo "babric_jar=$babric_jar"
+            echo "version_type=$vtype"
+            echo "release_files<<EOF"
+            echo "$main_jar"
+            if [ -n "$babric_jar" ]; then echo "$babric_jar"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "resolved: $base $version (mc $mc), babric jar: ${babric_jar:-none}"
+
+      # --- GitHub release: always published (idempotent - updates the tag's release) ---
+      - name: Publish to GitHub Releases
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.mod.outputs.release_files }}
+          fail_on_unmatched_files: true
+
+      # --- Modrinth: only when both MODRINTH_TOKEN (secret) and MODRINTH_ID (variable) exist ---
+      - name: Detect Modrinth configuration
+        id: modrinth
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+        run: |
+          if [ -n "$MODRINTH_TOKEN" ] && [ -n "$MODRINTH_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::MODRINTH_TOKEN secret and/or MODRINTH_ID variable not configured; skipping Modrinth publish"
+          fi
+
+      - name: Publish Ornithe to Modrinth
+        if: steps.modrinth.outputs.enabled == 'true'
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: ${{ vars.MODRINTH_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: ${{ steps.mod.outputs.main_jar }}
+          name: ${{ github.event.repository.name }} ${{ steps.mod.outputs.version }} (Ornithe)
+          version: ${{ steps.mod.outputs.version }}
+          version-type: ${{ steps.mod.outputs.version_type }}
+          loaders: ornithe
+          game-versions: ${{ steps.mod.outputs.minecraft_version }}
+          # b1.7.3 is an old_beta; mc-publish's default game-version-filter (releases | min-major |
+          # min-minor) drops it, leaving an empty list -> "At least one game version should be
+          # specified". `any` keeps beta/alpha versions so b1.7.3 survives.
+          game-version-filter: any
+          changelog: ${{ github.event.release.body }}
+
+      # Babric variant (only if the build produced a -babric jar, e.g. via the retroconvert plugin).
+      # The babric bundle is self-contained, so it is published for the babric loader only.
+      - name: Publish Babric to Modrinth
+        if: steps.modrinth.outputs.enabled == 'true' && steps.mod.outputs.babric_jar != ''
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: ${{ vars.MODRINTH_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: ${{ steps.mod.outputs.babric_jar }}
+          name: ${{ github.event.repository.name }} ${{ steps.mod.outputs.version }} (Babric)
+          version: ${{ steps.mod.outputs.version }}+babric
+          version-type: ${{ steps.mod.outputs.version_type }}
+          loaders: babric
+          game-versions: ${{ steps.mod.outputs.minecraft_version }}
+          # See the Ornithe step: `any` keeps the old_beta b1.7.3 from being filtered out.
+          game-version-filter: any
+          changelog: ${{ github.event.release.body }}
