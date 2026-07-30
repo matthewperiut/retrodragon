@@ -442,7 +442,13 @@ def contentApis = [
 		// Fetched WITHOUT its transitives (localize() resolves non-transitively), which is what is
 		// wanted: retroapi's pom asks for starac -- an LWJGL 3 layer this mod replaces outright --
 		// and for OSL gen2 modules that are already on this project's runtime classpath.
-		coords: ["com.periut:retroapi:${project.retroapi_version}"],
+		//
+		// retrocommands is staged in the SAME run rather than getting a runClientRetrocommands of
+		// its own, because it is a RetroAPI mod: installed alone it has no API to load against. Its
+		// pom wants starac and retroapi 0.2.0; the non-transitive fetch above drops both, so it runs
+		// against whatever retroapi_version says and against this mod's in-tree starac replacement.
+		coords: ["com.periut:retroapi:${project.retroapi_version}",
+		         "com.periut:retrocommands:${project.retrocommands_version}"],
 	],
 ]
 

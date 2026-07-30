@@ -13,6 +13,7 @@
     "Vec3dCacheMixin",
     "WorldRegionBiomeMixin",
     "BlockBoundsLockMixin",
+    "BlockBoundsWriteLockMixin",
     "WorldCollisionLockMixin",
     "FocusMixin",
     "AntiAliasMixin",
