@@ -149,6 +149,61 @@ public final class WebGPUContext implements AutoCloseable {
 		return toggles;
 	}
 
+	/**
+	 * The native API to demand of Dawn, or 0 to let it choose.
+	 *
+	 * <p>{@code -Dretrogpu.backendType=d3d12|vulkan|opengl|gles|metal}. Dawn's default is the right
+	 * one to ship -- D3D12 on Windows, Metal on macOS, Vulkan on Linux -- so this is a measuring
+	 * tool, not a setting.
+	 *
+	 * <p>It answers a question no other measurement can: how much of the WebGPU renderer's cost is
+	 * the API underneath it, and how much is the command stream this mod hands it. Running the same
+	 * frame through two backends on ONE machine holds the CPU-side work, the driver's hardware and
+	 * the scene constant and varies only the translation layer, which is the difference between "the
+	 * D3D12 backend is slow here" and "we submit too much work". Comparing Windows against a
+	 * different machine's Linux/Vulkan run cannot separate those.
+	 *
+	 * <p>Not every backend is present in every Dawn build, and a build that lacks one simply returns
+	 * no adapter -- see the failure message in {@link #awaitAdapter()}.
+	 */
+	private static int forcedBackend() {
+		return switch (System.getProperty("retrogpu.backendType", "").toLowerCase(java.util.Locale.ROOT)) {
+			case "d3d12" -> WGPUBackendType_D3D12();
+			case "d3d11" -> WGPUBackendType_D3D11();
+			case "vulkan" -> WGPUBackendType_Vulkan();
+			case "metal" -> WGPUBackendType_Metal();
+			case "opengl", "gl" -> WGPUBackendType_OpenGL();
+			case "gles", "opengles" -> WGPUBackendType_OpenGLES();
+			default -> 0;
+		};
+	}
+
+	/**
+	 * The WebGPU feature level to ask for, or 0 to leave it at Dawn's default.
+	 *
+	 * <p>{@code -Dretrogpu.featureLevel=core|compatibility}. Zero-initialised means
+	 * {@code WGPUFeatureLevel_Undefined}, which Dawn reads as Core -- so leaving it alone is what
+	 * this mod has always done and what it should keep doing in production.
+	 *
+	 * <p>It exists because <b>Core is what hides the D3D11 backend</b>. D3D11 cannot implement
+	 * everything core WebGPU requires, so Dawn only ever offers a D3D11 adapter to a request that
+	 * asked for Compatibility; a Core request gets "unavailable" and no explanation, which reads
+	 * exactly like a backend that was never compiled in. It was compiled in -- {@code d3d11.dll} is
+	 * in the binary next to {@code d3d12.dll}.
+	 *
+	 * <p><b>A Compatibility run is not a like-for-like comparison.</b> The level restricts what the
+	 * device can do, so a D3D11-vs-D3D12 measurement is only honest if D3D12 is measured at the same
+	 * level, and even then the renderer may lose features or fail outright. Treat any number from it
+	 * as indicative, not as parity.
+	 */
+	private static int forcedFeatureLevel() {
+		return switch (System.getProperty("retrogpu.featureLevel", "").toLowerCase(java.util.Locale.ROOT)) {
+			case "core" -> WGPUFeatureLevel_Core();
+			case "compat", "compatibility" -> WGPUFeatureLevel_Compatibility();
+			default -> 0;
+		};
+	}
+
 	private MemorySegment awaitAdapter() {
 		MemorySegment[] out = {MemorySegment.NULL};
 		int[] status = {-1};
@@ -162,10 +217,22 @@ public final class WebGPUContext implements AutoCloseable {
 
 		MemorySegment options = com.periut.webgpu.WGPURequestAdapterOptions.allocate(arena);
 		com.periut.webgpu.WGPURequestAdapterOptions.nextInChain(options, toggles());
+		int forced = forcedBackend();
+		if (forced != 0) {
+			com.periut.webgpu.WGPURequestAdapterOptions.backendType(options, forced);
+		}
+		int level = forcedFeatureLevel();
+		if (level != 0) {
+			com.periut.webgpu.WGPURequestAdapterOptions.featureLevel(options, level);
+		}
 		wgpuInstanceRequestAdapter(arena, instance, options, cbInfo);
 		pumpUntil(() -> status[0] != -1, "adapter");
 		if (out[0].equals(MemorySegment.NULL)) {
-			throw new IllegalStateException("no WebGPU adapter (status " + status[0] + ")");
+			String forcedNote = forced == 0 ? ""
+				: " -- -Dretrogpu.backendType=" + System.getProperty("retrogpu.backendType")
+					+ " was requested, and this Dawn build may not contain that backend";
+			throw new IllegalStateException("no WebGPU adapter (status " + status[0] + ")"
+				+ forcedNote);
 		}
 		return out[0];
 	}

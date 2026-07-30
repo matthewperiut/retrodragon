@@ -46,9 +46,35 @@ public final class GpuBackend {
 		} catch (Throwable t) {
 			// Throwable, not Exception: a missing or mismatched native surfaces as
 			// UnsatisfiedLinkError, which is exactly the case that must not take the game down.
-			status = "unavailable (" + t.getClass().getSimpleName() + ": " + t.getMessage() + ")";
+			status = "unavailable (" + describe(t) + ")";
 			context = null;
 		}
+	}
+
+	/**
+	 * The throwable, and its causes, as one line.
+	 *
+	 * <p>Following the cause chain rather than printing {@code t.getMessage()} alone. A class-init
+	 * failure anywhere under {@code com.periut.webgpu} arrives as {@code ExceptionInInitializerError},
+	 * whose own message is always null -- the entire explanation lives in the cause. Reporting just
+	 * the message gave "unavailable (ExceptionInInitializerError: null)", which says only that
+	 * something went wrong somewhere, and cost a Windows-only 32-bit-C-`long` layout cast (see
+	 * {@code webgpu_h$shared.C_LONG}) rather more debugging than it should have.
+	 */
+	private static String describe(Throwable t) {
+		StringBuilder out = new StringBuilder();
+		// Bounded, and identity-tracked: a self-referential or cyclic cause chain must not spin here.
+		java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		for (Throwable at = t; at != null && seen.add(at) && seen.size() <= 8; at = at.getCause()) {
+			if (!out.isEmpty()) {
+				out.append(" <- ");
+			}
+			out.append(at.getClass().getSimpleName());
+			if (at.getMessage() != null) {
+				out.append(": ").append(at.getMessage());
+			}
+		}
+		return out.toString();
 	}
 
 	public static boolean available() {

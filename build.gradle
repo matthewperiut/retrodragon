@@ -153,11 +153,16 @@ dependencies {
 
 	// ---------------------------------------------------------------------------------------
 	// WebGPU via Dawn. com.periut.retrodragon.gpu owns every FFM call; com.periut.webgpu is the
-	// jextract output. WebGPUNatives extracts native/dawn/<lib> from the classpath, so the four
+	// jextract output. WebGPUNatives extracts native/dawn/<lib> from the classpath, so these
 	// platform jars must be BOTH on the dev runtime classpath AND nested in the shipped jar --
 	// loom's `include` does not follow transitives and these are plain libraries, not mods.
+	//
+	// windows_x64 is deliberately NOT in this list, and adding it back would ship 5.5 MB of
+	// unreachable code. jWebGPU's Windows native exports no wgpu* symbol, so SymbolLookup cannot
+	// bind a single call against it -- Windows is served by downloadWindowsDawn below instead.
+	// See gradle.properties (dawn_windows_tag) and WebGPUNatives.resourcePath().
 	// ---------------------------------------------------------------------------------------
-	['windows_x64', 'linux_x64', 'mac_x64', 'mac_arm64'].each { platform ->
+	['linux_x64', 'mac_x64', 'mac_arm64'].each { platform ->
 		include runtimeOnly("com.github.xpenatan.jWebGPU:webgpu-desktop-jni-dawn_${platform}:${dawnVersion}")
 	}
 }
@@ -179,12 +184,131 @@ configurations.matching {
 	exclude group: 'org.lwjgl.lwjgl'
 }
 
+// ---------------------------------------------------------------------------------------------
+// Windows Dawn native: webgpu_dawn.dll.
+//
+// Fetched rather than vendored so no multi-MB binary lands in git history, and pinned + checksummed
+// because it is a network download that gets System.load()ed into the game's process. A checksum
+// mismatch fails the build; it is never a warning.
+//
+// The URL is a property so that moving between sources is a gradle.properties edit rather than a
+// build change -- see dawn_windows_url there for which source is in use and why. Both shapes are
+// handled: a .zip has webgpu_dawn.dll extracted out of it, a bare .dll is taken as-is.
+//
+// The download is cached under the GRADLE USER HOME, not build/, so `clean` does not force a
+// re-fetch -- once per machine per tag. It runs on every platform, because the shipped jar carries
+// every platform's native regardless of which one built it.
+// ---------------------------------------------------------------------------------------------
+def dawnWindowsTag = project.dawn_windows_tag
+def dawnWindowsSha256 = project.dawn_windows_sha256
+def dawnWindowsUrl = project.dawn_windows_url
+def dawnWindowsZip = new File(gradle.gradleUserHomeDir,
+	"caches/retrodragon-dawn/${dawnWindowsTag}/" + dawnWindowsUrl.substring(dawnWindowsUrl.lastIndexOf('/') + 1))
+// Staged with the classpath-relative layout WebGPUNatives looks for, so processResources can copy
+// the directory wholesale and the resource lands at native/dawn/webgpu_dawn.dll.
+def dawnWindowsStage = layout.buildDirectory.dir('dawn-windows')
+
+def sha256Of = { File file ->
+	def digest = java.security.MessageDigest.getInstance('SHA-256')
+	file.withInputStream { stream ->
+		byte[] buffer = new byte[1 << 16]
+		int read
+		while ((read = stream.read(buffer)) != -1) {
+			digest.update(buffer, 0, read)
+		}
+	}
+	return digest.digest().encodeHex().toString()
+}
+
+tasks.register('downloadWindowsDawn') {
+	group = 'build setup'
+	description = "Fetches and verifies webgpu_dawn.dll (${dawnWindowsTag}) for Windows."
+	// Declared so Gradle can skip the whole task once the DLL is staged, and re-run it if the
+	// pinned tag, URL or checksum in gradle.properties changes.
+	inputs.property 'tag', dawnWindowsTag
+	inputs.property 'sha256', dawnWindowsSha256
+	inputs.property 'url', dawnWindowsUrl
+	outputs.file dawnWindowsStage.map { it.file('native/dawn/webgpu_dawn.dll') }
+	outputs.cacheIf { true }
+
+	doLast {
+		String url = dawnWindowsUrl
+
+		// A cached download whose checksum no longer matches is a corrupt or tampered cache entry, not a
+		// reason to reuse it -- drop it and fetch again.
+		if (dawnWindowsZip.isFile() && sha256Of(dawnWindowsZip) != dawnWindowsSha256) {
+			logger.lifecycle("Cached ${dawnWindowsZip.name} failed its checksum; re-downloading.")
+			dawnWindowsZip.delete()
+		}
+
+		if (!dawnWindowsZip.isFile()) {
+			if (gradle.startParameter.offline) {
+				throw new GradleException("Cannot fetch the Windows Dawn native in --offline mode "
+					+ "and it is not cached at ${dawnWindowsZip}. Run once online, or drop the zip "
+					+ "there by hand.")
+			}
+			dawnWindowsZip.parentFile.mkdirs()
+			logger.lifecycle("Downloading ${url}")
+			// Via a .part file then rename: a download interrupted halfway must not leave something
+			// at the cache path that looks complete to the next build.
+			File part = new File(dawnWindowsZip.parentFile, "${dawnWindowsZip.name}.part")
+			part.delete()
+			new URI(url).toURL().withInputStream { input ->
+				part.withOutputStream { output -> output << input }
+			}
+			if (!part.renameTo(dawnWindowsZip)) {
+				// A concurrent build may have won the race and put the real file there already.
+				part.delete()
+				if (!dawnWindowsZip.isFile()) {
+					throw new GradleException("Could not move ${part} into place at ${dawnWindowsZip}")
+				}
+			}
+		}
+
+		String actual = sha256Of(dawnWindowsZip)
+		if (actual != dawnWindowsSha256) {
+			// Deleted before failing, so a retry re-downloads rather than re-failing on the same bad
+			// bytes. A genuine upstream change (a republished tag) lands here too -- in which case
+			// verify the new binary and update dawn_windows_sha256 deliberately.
+			dawnWindowsZip.delete()
+			throw new GradleException("Checksum mismatch for ${dawnWindowsZip.name}\n"
+				+ "  expected ${dawnWindowsSha256}\n  actual   ${actual}\n"
+				+ "Refusing to stage a native that does not match the pin in gradle.properties.")
+		}
+
+		File target = dawnWindowsStage.get().file('native/dawn/webgpu_dawn.dll').asFile
+		target.parentFile.mkdirs()
+		if (dawnWindowsZip.name.endsWith('.zip')) {
+			new java.util.zip.ZipFile(dawnWindowsZip).withCloseable { zip ->
+				def entry = zip.entries().find { !it.directory && it.name.endsWith('webgpu_dawn.dll') }
+				if (entry == null) {
+					throw new GradleException("No webgpu_dawn.dll inside ${dawnWindowsZip}")
+				}
+				zip.getInputStream(entry).withCloseable { input ->
+					target.withOutputStream { output -> output << input }
+				}
+			}
+		} else {
+			// A bare .dll asset, which is what natives/dawn-windows/build.ps1 publishes.
+			java.nio.file.Files.copy(dawnWindowsZip.toPath(), target.toPath(),
+				java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+		}
+		logger.lifecycle("Staged webgpu_dawn.dll (${target.length()} bytes) for Windows.")
+	}
+}
+
 processResources {
 	inputs.property 'version', version
 
 	filesMatching('fabric.mod.json') {
 		expand 'version': version
 	}
+
+	// Copied in as a resource rather than nested as a jar, because unlike the jWebGPU artifacts this
+	// is a bare DLL and not a maven module. It lands at native/dawn/webgpu_dawn.dll on the dev
+	// runtime classpath and in the shipped jar alike, which is all WebGPUNatives asks for.
+	dependsOn tasks.named('downloadWindowsDawn')
+	from(dawnWindowsStage)
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -226,6 +350,11 @@ tasks.register('childShimJar', Jar) {
 	from sourceSets.main.output
 	exclude 'org/lwjgl/**'
 	exclude 'natives/**'
+	// native/** (singular) is the Dawn layout: on Windows webgpu_dawn.dll is a plain RESOURCE in the
+	// main jar rather than a nested jar, so addNestedDependencies=false on the remap does not keep it
+	// out of the shim the way it does for the jWebGPU artifacts. Without this the child would carry
+	// its own 26 MB copy of the very library it must share with the hub.
+	exclude 'native/**'
 	// The bridge MUST resolve to the hub's single copy via parent delegation -- a child-local copy
 	// would have its own (empty) statics and the window handoff would deadlock on first use.
 	exclude 'com/periut/retrodragon/retrocenter/bridge/**'
@@ -398,6 +527,24 @@ tasks.withType(JavaExec).matching { it.name.startsWith('run') }.configureEach {
 	// Only childShimJar: dev runs use NAMED mappings, so the remapped variants stay on `build`.
 	dependsOn 'childShimJar'
 	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+	// -Dretroperf.jfr=<file> records a JDK Flight Recorder profile of the run.
+	//
+	// Here rather than in a run configuration because the question it answers -- "which Java method
+	// is the frame actually in" -- is the one a frame-time number cannot answer, and the alternative
+	// is guessing. A backend comparison is exactly the case where guessing is expensive: the first
+	// three hypotheses for the WebGPU/GL gap (frames in flight, present mode, upload budget) were all
+	// wrong, and each cost a 40-second run to disprove.
+	//
+	// settings=profile rather than default: the default profile samples too sparsely to say anything
+	// about a 0.8 ms frame.
+	def jfr = System.getProperty('retroperf.jfr')
+	if (jfr) {
+		jvmArgs "-XX:StartFlightRecording=settings=profile,filename=${file(jfr).absolutePath},dumponexit=true"
+		// The default stack depth (64) truncates exactly where the answer is. A sample that bottoms
+		// out in ByteBuffer.put is useless without the frame that says WHICH copy that was, and the
+		// render path here is deep: mixin -> Tessellator -> shim -> DrawList -> buffer.
+		jvmArgs '-XX:FlightRecorderOptions=stackdepth=256'
+	}
 }
 
 // Pure-CPU self-checks. They need the Minecraft classpath only because the classes they live in
@@ -494,6 +641,27 @@ tasks.register('webgpuBench', JavaExec) {
 	mainClass = 'com.periut.retrodragon.render.WebGpuBench'
 	jvmArgs '--enable-native-access=ALL-UNNAMED'
 	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
+// The other half of the picture: webgpuBench times the GEOMETRY, this times the FRAME. An empty
+// frame's cost is the ceiling the renderer cannot exceed no matter how cheap drawing becomes, and
+// it is invisible to every offscreen benchmark because it is made of acquire, submit, fence and
+// present rather than triangles.
+tasks.register('webgpuLoopBench', JavaExec) {
+	group = 'verification'
+	description = 'Frame-loop throughput against a real surface; empty frames, uncapped.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.render.WebGpuLoopBench'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	if (macOs) {
+		jvmArgs '-XstartOnFirstThread'
+	}
+	// Uncapped by default: the whole point is to measure the path the frame limiter is off on.
+	// -Dretroperf.pacing=balanced still works for a vsync comparison.
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+	if (!System.getProperties().containsKey('retroperf.pacing')) {
+		systemProperty 'retroperf.pacing', 'max'
+	}
 }
 
 tasks.register('featureProbe', JavaExec) {

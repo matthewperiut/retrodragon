@@ -146,6 +146,30 @@ public final class GlState {
 	private final ByteBuffer uniforms =
 		ByteBuffer.allocateDirect(UNIFORM_BYTES).order(ByteOrder.nativeOrder());
 
+	/**
+	 * A float view of {@link #uniforms}, made once.
+	 *
+	 * <p>Safe to hold because the buffer is exactly {@link #UNIFORM_BYTES} and never re-sized, so the
+	 * view always spans the whole thing; {@code writeUniforms} rewinds it rather than re-deriving it.
+	 */
+	private final FloatBuffer uniformFloats = uniforms.asFloatBuffer();
+
+	/** Where the block is assembled before it reaches {@link #uniforms}; see writeUniforms. */
+	private final float[] block = new float[UNIFORM_FLOATS];
+
+	/**
+	 * What {@link #uniforms} currently holds, so an unchanged block can skip the copy into it.
+	 *
+	 * <p>{@code Arrays.equals} on floats compares through {@code Float.floatToIntBits}, which is
+	 * bitwise except that it folds every NaN onto one encoding. So it is stricter than {@code ==}
+	 * where it matters here -- {@code -0.0f} and {@code 0.0f} compare unequal, and the copy happens --
+	 * and looser than a byte compare only for two DIFFERENT NaN encodings. No lane of this block can
+	 * be NaN: the only division is {@code 1/span}, guarded on {@code span == 0}, and every other lane
+	 * is a matrix element, a colour, a flag or a texture parameter. So the comparison is exact for
+	 * the values that actually occur.
+	 */
+	private final float[] previousBlock = new float[UNIFORM_FLOATS];
+
 	public GlState() {
 		identity(modelViewStack[0]);
 		identity(projectionStack[0]);
@@ -377,42 +401,78 @@ public final class GlState {
 	 */
 	public ByteBuffer writeUniforms(boolean vertexColors, boolean vertexNormals,
 			boolean vertexTexture) {
-		uniforms.clear();
-		FloatBuffer f = uniforms.asFloatBuffer();
-		f.put(modelViewStack[modelViewTop]);
-		f.put(projectionStack[projectionTop]);
+		// Staged in a plain float[] and pushed to the direct buffer in ONE copy, rather than written
+		// field by field straight into it.
+		//
+		// This is on the hottest path the shim has. A frame here is ~1100 captures for ~10k vertices
+		// -- nine vertices a batch -- so the 256-byte block is built more times per frame than there
+		// are draws, and the uniform traffic outweighs the vertex data it describes. Every put() on a
+		// direct buffer is a bounds check plus a memory-session liveness check; on a heap array the
+		// JIT drops both and keeps the values in registers. The single bulk put at the end is an
+		// intrinsified memcpy.
+		float[] u = block;
+		System.arraycopy(modelViewStack[modelViewTop], 0, u, 0, 16);
+		System.arraycopy(projectionStack[projectionTop], 0, u, 16, 16);
 
 		if (vertexColors) {
-			f.put(1.0F).put(1.0F).put(1.0F).put(1.0F);
+			u[32] = 1.0F;
+			u[33] = 1.0F;
+			u[34] = 1.0F;
+			u[35] = 1.0F;
 		} else {
-			f.put(color);
+			System.arraycopy(color, 0, u, 32, 4);
 		}
 
-		f.put(fogColor);
+		System.arraycopy(fogColor, 0, u, 36, 4);
 		// x = mode, y = start-or-density, z = end, w = 1/(end-start) precomputed for linear fog.
 		float span = fogEnd - fogStart;
-		f.put(fogEnabled ? fogMode : FOG_LINEAR)
-			.put(fogMode == FOG_LINEAR ? fogStart : fogDensity)
-			.put(fogEnabled ? fogEnd : Float.MAX_VALUE)
-			.put(span == 0.0F ? 0.0F : 1.0F / span);
+		u[40] = fogEnabled ? fogMode : FOG_LINEAR;
+		u[41] = fogMode == FOG_LINEAR ? fogStart : fogDensity;
+		u[42] = fogEnabled ? fogEnd : Float.MAX_VALUE;
+		u[43] = span == 0.0F ? 0.0F : 1.0F / span;
 
-		f.put(alphaRef)
-			.put(alphaTestEnabled ? 1.0F : 0.0F)
-			.put(textureEnabled ? 1.0F : 0.0F)
-			.put(lightingEnabled ? 1.0F : 0.0F);
+		u[44] = alphaRef;
+		u[45] = alphaTestEnabled ? 1.0F : 0.0F;
+		u[46] = textureEnabled ? 1.0F : 0.0F;
+		u[47] = lightingEnabled ? 1.0F : 0.0F;
 
 		// The w of each is padding in the lighting maths and carries a terrain parameter instead.
-		f.put(lightDir0[0]).put(lightDir0[1]).put(lightDir0[2]).put(atlasTexels);
-		f.put(lightDir1[0]).put(lightDir1[1]).put(lightDir1[2]).put(maxLod);
-		f.put(lightAmbient[0]).put(lightAmbient[1]).put(lightAmbient[2]).put(rgss);
+		u[48] = lightDir0[0];
+		u[49] = lightDir0[1];
+		u[50] = lightDir0[2];
+		u[51] = atlasTexels;
+		u[52] = lightDir1[0];
+		u[53] = lightDir1[1];
+		u[54] = lightDir1[2];
+		u[55] = maxLod;
+		u[56] = lightAmbient[0];
+		u[57] = lightAmbient[1];
+		u[58] = lightAmbient[2];
+		u[59] = rgss;
 
 		// w was the block's last free lane; the terrain program reads the grid pitch from it. Keeping
 		// it here rather than growing the block is what holds the whole thing at exactly 256 bytes,
 		// which is WebGPU's dynamic-offset alignment -- 260 would round every per-draw slot to 512.
-		f.put(vertexColors ? 1.0F : 0.0F)
-			.put(vertexNormals ? 1.0F : 0.0F)
-			.put(vertexTexture ? 1.0F : 0.0F)
-			.put(tileTexels);
+		u[60] = vertexColors ? 1.0F : 0.0F;
+		u[61] = vertexNormals ? 1.0F : 0.0F;
+		u[62] = vertexTexture ? 1.0F : 0.0F;
+		u[63] = tileTexels;
+
+		// Only touch the direct buffer when the block actually changed. Three quarters of the
+		// captures in a frame produce a block byte-identical to the one before -- that is exactly
+		// why DrawList's merge works as well as it does -- and for those the buffer already holds
+		// these bytes.
+		//
+		// NOT a dirty flag on the setters: the block is rebuilt from live state every single call, so
+		// there is no state a missed setter could leave stale here. The comparison is the check.
+		if (!java.util.Arrays.equals(u, previousBlock)) {
+			uniforms.clear();
+			uniformFloats.clear();
+			uniformFloats.put(u);
+			System.arraycopy(u, 0, previousBlock, 0, UNIFORM_FLOATS);
+		} else {
+			uniforms.position(0);
+		}
 
 		uniforms.limit(UNIFORM_BYTES);
 		return uniforms;
@@ -427,8 +487,23 @@ public final class GlState {
 	}
 
 	/** {@code dst = dst * src}, matching glMultMatrix's post-multiply order. */
-	private static void multiply(float[] dst, float[] src) {
-		float[] out = new float[16];
+	/**
+	 * Scratch for {@link #multiply}'s result. Distinct from {@link #scratch}, which holds the
+	 * OPERAND every caller but multMatrix builds -- writing the product into that would corrupt the
+	 * matrix being multiplied by, halfway through reading it.
+	 */
+	private final float[] product = new float[16];
+
+	/**
+	 * Instance rather than static, purely so the result can live in {@link #product}.
+	 *
+	 * <p>This allocated a {@code float[16]} per call, and beta calls it constantly -- a translate per
+	 * section group, a push/translate/rotate per entity, several per GUI element. It was the largest
+	 * source of allocation this mod is responsible for on the render thread, second only to Mixin's
+	 * own CallbackInfo objects, which are not ours to remove.
+	 */
+	private void multiply(float[] dst, float[] src) {
+		float[] out = product;
 		for (int col = 0; col < 4; col++) {
 			for (int row = 0; row < 4; row++) {
 				float sum = 0.0F;
@@ -497,6 +572,8 @@ public final class GlState {
 		if (u.limit() != UNIFORM_BYTES) {
 			throw new AssertionError("uniform size " + u.limit() + " != " + UNIFORM_BYTES);
 		}
+
+		checkUniformBlockEquivalence();
 
 		// A vertex-colour draw must neutralise the modulator, or lit geometry double-darkens.
 		GlState cs = new GlState();
@@ -601,5 +678,131 @@ public final class GlState {
 					+ " got " + java.util.Arrays.toString(actual));
 			}
 		}
+	}
+
+	/**
+	 * {@link #writeUniforms} must produce the same 256 bytes it always did.
+	 *
+	 * <p>That method was rewritten for speed -- it stages the block in a {@code float[]} and only
+	 * copies into the direct buffer when the contents changed, because it runs ~1100 times a frame
+	 * and three quarters of those produce a block identical to the one before. The optimisation is
+	 * only worth having if it is invisible, and "invisible" here means byte-identical output, not
+	 * approximately-right output: these bytes are a uniform block, so a single wrong lane is a wrong
+	 * matrix, a wrong fog colour or a wrong alpha reference on screen.
+	 *
+	 * <p>Checked against a straightforward reference implementation over randomised states rather
+	 * than a fixed expected blob. A blob would have to be regenerated whenever the block's layout
+	 * legitimately changes, and regenerating it from the code under test proves nothing. The seed is
+	 * fixed so a failure reproduces exactly.
+	 *
+	 * <p>Exercises the skip path deliberately: the same state is written twice in a row (must reuse)
+	 * and then perturbed by one field at a time (must rewrite). A stale-block bug shows up only in
+	 * that second write, which is precisely the case a single-shot test would miss.
+	 */
+	private static void checkUniformBlockEquivalence() {
+		java.util.Random random = new java.util.Random(20260730L);
+		GlState state = new GlState();
+		byte[] fromFast = new byte[UNIFORM_BYTES];
+		byte[] fromReference = new byte[UNIFORM_BYTES];
+		int rewrites = 0;
+
+		for (int iteration = 0; iteration < 4000; iteration++) {
+			// Mutate one aspect per iteration, so consecutive calls often differ by a single lane --
+			// the case where a too-eager skip would go unnoticed.
+			switch (iteration % 11) {
+				case 0 -> state.translate(random.nextFloat(), random.nextFloat(), random.nextFloat());
+				case 1 -> state.rotate(random.nextFloat() * 360.0F, 0.0F, 1.0F, 0.0F);
+				case 2 -> state.color(random.nextFloat(), random.nextFloat(), random.nextFloat(),
+					random.nextFloat());
+				case 3 -> {
+					state.setFogEnabled(random.nextBoolean());
+					state.setFog(random.nextInt(3), random.nextFloat(),
+						random.nextFloat() + 1.0F, random.nextFloat());
+				}
+				case 4 -> state.setFogColor(random.nextFloat(), random.nextFloat(), random.nextFloat(),
+					1.0F);
+				case 5 -> {
+					state.setAlphaTestEnabled(random.nextBoolean());
+					state.setAlphaRef(random.nextFloat());
+				}
+				case 6 -> state.setTextureEnabled(random.nextBoolean());
+				case 7 -> state.setLightingEnabled(random.nextBoolean());
+				case 8 -> state.setLightModelAmbient(random.nextFloat(), random.nextFloat(),
+					random.nextFloat());
+				case 9 -> state.setTerrainParams(random.nextInt(2048) + 1, random.nextInt(64),
+					random.nextInt(8), random.nextInt(2));
+				default -> state.matrixMode(random.nextBoolean() ? MODE_PROJECTION : MODE_MODELVIEW);
+			}
+
+			boolean colors = random.nextBoolean();
+			boolean normals = random.nextBoolean();
+			boolean texture = random.nextBoolean();
+
+			// Twice with identical state: the first may copy, the second must be a no-op that still
+			// yields the same bytes.
+			for (int repeat = 0; repeat < 2; repeat++) {
+				ByteBuffer actual = state.writeUniforms(colors, normals, texture);
+				if (actual.position() != 0 || actual.limit() != UNIFORM_BYTES) {
+					throw new AssertionError("uniform buffer handed back at position "
+						+ actual.position() + " limit " + actual.limit());
+				}
+				actual.duplicate().get(fromFast);
+				state.referenceUniforms(colors, normals, texture).get(fromReference);
+				if (!java.util.Arrays.equals(fromFast, fromReference)) {
+					int lane = 0;
+					while (lane < UNIFORM_BYTES && fromFast[lane] == fromReference[lane]) {
+						lane++;
+					}
+					throw new AssertionError("uniform block differs from the reference at byte "
+						+ lane + " (float " + lane / 4 + "), iteration " + iteration
+						+ ", repeat " + repeat);
+				}
+				if (repeat == 0) {
+					rewrites++;
+				}
+			}
+		}
+		System.out.println("GlState uniform block: 8000 writes checked against the reference, "
+			+ rewrites + " distinct states, byte-identical");
+	}
+
+	/**
+	 * The obvious implementation of {@link #writeUniforms}, for the self-check to compare against.
+	 *
+	 * <p>Writes straight into a fresh buffer every call with no staging and no skipping -- slow, and
+	 * deliberately so. It is here to be readable and obviously correct, which is what makes it worth
+	 * comparing the fast path to. Keep it in step with the real one when the block's layout changes;
+	 * a change to one and not the other is exactly what this is designed to catch.
+	 */
+	private ByteBuffer referenceUniforms(boolean vertexColors, boolean vertexNormals,
+			boolean vertexTexture) {
+		ByteBuffer out = ByteBuffer.allocateDirect(UNIFORM_BYTES).order(ByteOrder.nativeOrder());
+		FloatBuffer f = out.asFloatBuffer();
+		f.put(modelViewStack[modelViewTop]);
+		f.put(projectionStack[projectionTop]);
+		if (vertexColors) {
+			f.put(1.0F).put(1.0F).put(1.0F).put(1.0F);
+		} else {
+			f.put(color);
+		}
+		f.put(fogColor);
+		float span = fogEnd - fogStart;
+		f.put(fogEnabled ? fogMode : FOG_LINEAR)
+			.put(fogMode == FOG_LINEAR ? fogStart : fogDensity)
+			.put(fogEnabled ? fogEnd : Float.MAX_VALUE)
+			.put(span == 0.0F ? 0.0F : 1.0F / span);
+		f.put(alphaRef)
+			.put(alphaTestEnabled ? 1.0F : 0.0F)
+			.put(textureEnabled ? 1.0F : 0.0F)
+			.put(lightingEnabled ? 1.0F : 0.0F);
+		f.put(lightDir0[0]).put(lightDir0[1]).put(lightDir0[2]).put(atlasTexels);
+		f.put(lightDir1[0]).put(lightDir1[1]).put(lightDir1[2]).put(maxLod);
+		f.put(lightAmbient[0]).put(lightAmbient[1]).put(lightAmbient[2]).put(rgss);
+		f.put(vertexColors ? 1.0F : 0.0F)
+			.put(vertexNormals ? 1.0F : 0.0F)
+			.put(vertexTexture ? 1.0F : 0.0F)
+			.put(tileTexels);
+		out.position(0).limit(UNIFORM_BYTES);
+		return out;
 	}
 }

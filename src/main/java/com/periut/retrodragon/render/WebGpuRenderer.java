@@ -371,6 +371,16 @@ public final class WebGpuRenderer implements AutoCloseable {
 		// waiting now shows the freshest possible image rather than an extra frame of latency.
 		FramePacing.await();
 		if (renderingOffscreen) {
+			// The frame was drawn straight into `offscreen`, so it IS the last frame -- no copy
+			// needed, only the flag that says readPixels may look at it.
+			//
+			// Without this, screenshots came out BLACK in Max FPS and only in Max FPS. The flag was
+			// set solely by captureLastFrame(), which runs in the vsync branch, so the uncapped path
+			// -- the one whose whole design is "render into offscreen" -- never marked the frame it
+			// had just rendered as readable. readPixels then returned false and beta wrote out the
+			// untouched buffer. It bites hardest under the bench, which forces the frame limiter off
+			// and so takes every appearance A/B screenshot down this exact branch.
+			lastFrameValid = true;
 			presentOffscreen();
 		} else {
 			// Keep a copy of what is about to be shown. beta calls handleScreenshotKey() AFTER

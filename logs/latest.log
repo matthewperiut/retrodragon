@@ -1,4 +1,1 @@
-[16:08:34] [main/INFO]: block atlas: vanilla 256x256 grid 16x16 of 16
-[16:08:34] [main/INFO]: block atlas: vanilla 512x512 grid 16x16 of 32
-[16:08:34] [main/INFO]: block atlas: vanilla 512x256 stitched
-[16:08:34] [main/INFO]: block atlas: vanilla 256x256 grid 16x16 of 16
+[09:34:27] [main/INFO]: window: SDL3 windows, no GL context (WebGPU surface), 854x480 px at 1.0x (headless)

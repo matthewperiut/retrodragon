@@ -317,6 +317,9 @@ public final class WebGpuFrame {
 			LIST, pipelines, textures);
 		int vertices = LIST.vertexCount();
 		int segments = LIST.segmentCount();
+		// Read before reset(), which zeroes them.
+		int batches = LIST.batchCount();
+		int merged = LIST.mergedCount();
 		if (frames + 1 == SHOT_FRAME) {
 			renderer.screenshot(java.nio.file.Path.of("webgpu-frame-" + SHOT_FRAME + ".png"));
 		}
@@ -336,6 +339,14 @@ public final class WebGpuFrame {
 				frames, lastDraws, immediate.bindsLastFrame(), vertices, segments,
 				textures.count(), pipelines.builtCount(), FramePacing.describe(),
 				TerrainAppearance.enabled() ? "on" : "off");
+			// Captures and merges alongside the draw count, because the three answer different
+			// questions and only together say where the capture path's time goes. Draws is what
+			// reaches the GPU; captures is how many times the shim built a 256-byte uniform block and
+			// compared it against its neighbour, which happens whether or not the batch survives as
+			// its own draw. A frame with few draws and many captures is paying per-batch CPU cost for
+			// GPU work it already collapsed.
+			RetroDragon.LOGGER.info("frame {}: {} captures -> {} batches ({} merged away)",
+				frames, batches + merged, batches, merged);
 		}
 	}
 

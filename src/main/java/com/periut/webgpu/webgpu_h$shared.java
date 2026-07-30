@@ -27,7 +27,32 @@ public class webgpu_h$shared {
     public static final ValueLayout.OfDouble C_DOUBLE = (ValueLayout.OfDouble) Linker.nativeLinker().canonicalLayouts().get("double");
     public static final AddressLayout C_POINTER = ((AddressLayout) Linker.nativeLinker().canonicalLayouts().get("void*"))
             .withTargetLayout(MemoryLayout.sequenceLayout(java.lang.Long.MAX_VALUE, C_CHAR));
-    public static final ValueLayout.OfLong C_LONG = (ValueLayout.OfLong) Linker.nativeLinker().canonicalLayouts().get("long");
+    // HAND-EDITED, and the edit must survive any jextract regeneration.
+    //
+    // jextract emitted `(ValueLayout.OfLong) canonicalLayouts().get("long")` here. That holds on
+    // macOS and Linux (LP64: C `long` is 64-bit) and throws ClassCastException on win32-x64
+    // (LLP64: C `long` is 32-bit, so the canonical layout is OfInt). The throw happens in this
+    // class's STATIC INITIALIZER, so on Windows every single binding in com.periut.webgpu was
+    // dead on arrival -- WebGPUContext.create() failed with ExceptionInInitializerError before
+    // reaching a single native call, and GpuBackend reported "no WebGPU device: unavailable",
+    // which reads like a missing driver rather than a layout cast.
+    //
+    // Widening to `long long` on such platforms is correct rather than merely convenient: these
+    // bindings were generated from macOS headers where `size_t`, `intptr_t` and `ptrdiff_t` are
+    // `long`, and every one of C_LONG's ~115 uses is one of those (the size_t `*Count` and
+    // `length` struct fields, and the size_t offset/size/count parameters of
+    // wgpuQueueWriteBuffer, wgpuBufferMapAsync, wgpuRenderPassEncoderSetBindGroup and friends).
+    // All of them are 64-bit on win32-x64 too. webgpu.h itself declares no `long` field, so
+    // nothing here wants the platform's real 32-bit `long`.
+    public static final ValueLayout.OfLong C_LONG = cLong();
+
+    private static ValueLayout.OfLong cLong() {
+        MemoryLayout canonical = Linker.nativeLinker().canonicalLayouts().get("long");
+        if (canonical instanceof ValueLayout.OfLong ofLong) {
+            return ofLong;
+        }
+        return (ValueLayout.OfLong) Linker.nativeLinker().canonicalLayouts().get("long long");
+    }
 
     static final boolean TRACE_DOWNCALLS = Boolean.getBoolean("jextract.trace.downcalls");
 

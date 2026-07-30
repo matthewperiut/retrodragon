@@ -15,10 +15,6 @@ package com.periut.retrodragon.gpu;
  * is a run of this rather than an opinion, and it takes a second.
  */
 public final class FeatureProbe {
-	/** {@code WGPUFeatureName_MultiDrawIndirect}, and its indexed sibling. */
-	private static final int MULTI_DRAW_INDIRECT = 0x50034;
-	private static final int MULTI_DRAW_INDEXED_INDIRECT = 0x50035;
-
 	private FeatureProbe() {
 	}
 
@@ -30,10 +26,17 @@ public final class FeatureProbe {
 			for (int feature : features) {
 				System.out.printf("  0x%05X%n", feature);
 			}
-			System.out.println("MultiDrawIndirect        (0x50034) = "
-				+ ctx.hasFeature(MULTI_DRAW_INDIRECT));
-			System.out.println("MultiDrawIndexedIndirect (0x50035) = "
-				+ ctx.hasFeature(MULTI_DRAW_INDEXED_INDIRECT));
+			// Via DawnFeatures, not the hardcoded 0x50034 this used to carry: that number is only
+			// correct for the Dawn on Linux and macOS, and on Windows it silently probed something
+			// else. The value is printed because it is the thing to check against the list above.
+			int multiDraw = DawnFeatures.multiDrawIndirect();
+			System.out.printf("MultiDrawIndirect        (0x%05X) = %s%n",
+				multiDraw, ctx.hasFeature(multiDraw));
+			// There is deliberately no MultiDrawIndexedIndirect line. This printed one for 0x50035,
+			// which is not an indexed sibling in either shipped Dawn -- in jWebGPU 0.3.4's numbering
+			// that value is DawnTexelCopyBufferRowAlignment, so the answer was about an unrelated
+			// feature. Neither header declares any indexed multi-draw feature; the single
+			// MultiDrawIndirect feature is what guards both entry points.
 		}
 	}
 }

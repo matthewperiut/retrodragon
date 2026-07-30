@@ -1,0 +1,94 @@
+# Links webgpu_dawn.dll for Windows and attaches it to a GitHub Release.
+#
+# Windows is the one platform whose Dawn this repository has to produce itself. jWebGPU publishes
+# three Windows natives and none of them exports the wgpu* C API that the FFM bindings resolve
+# against -- see natives/dawn-windows/build.ps1 for the full reason. That script links jWebGPU's own
+# static Dawn into a DLL that does export it, which is why this job needs no Dawn toolchain at all:
+# windows-latest already has the only thing it uses, MSVC's link.exe.
+#
+# Run this MANUALLY (workflow_dispatch) when dawn_version changes, then:
+#   1. take the sha256 from the job summary,
+#   2. put it in dawn_windows_sha256 in gradle.properties,
+#   3. point dawn_windows_url at the release asset,
+#   4. update DAWN_WINDOWS_TAG in WebGPUNatives to the release tag.
+#
+# It is deliberately not on push: the output is a binary release asset, and re-cutting one on every
+# commit would churn releases for no reason. The DLL only changes when jWebGPU's Dawn does.
+
+name: Dawn (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dawn_version:
+        description: "jWebGPU version to take the static Dawn from (match dawn_version in gradle.properties)"
+        required: true
+        default: "0.3.4"
+      release_tag:
+        description: "Release tag to create or update, e.g. dawn-windows-0.3.4"
+        required: true
+        default: "dawn-windows-0.3.4"
+
+permissions:
+  contents: write   # needed to create the release and upload the asset
+
+jobs:
+  link:
+    name: link webgpu_dawn.dll
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No MSVC setup action: windows-latest ships VS2022, and build.ps1 locates it through vswhere
+      # and imports the environment itself. One less third-party action in the supply chain, and the
+      # same script works unchanged from a plain shell locally.
+      # Inputs reach the scripts through the environment rather than by ${{ }} interpolation into the
+      # script body: an input is attacker-controlled text, and interpolating it would splice it into
+      # the PowerShell source itself. This job has contents:write, so that is worth not doing.
+      - name: Link
+        shell: pwsh
+        env:
+          DAWN_VERSION: ${{ inputs.dawn_version }}
+        run: ./natives/dawn-windows/build.ps1 -DawnVersion $env:DAWN_VERSION
+
+      # build.ps1 parses its own output's export table and fails if the C API is not there, so a
+      # broken link cannot reach a release. No separate verification step is needed.
+
+      - name: Summarise
+        shell: pwsh
+        env:
+          DAWN_VERSION: ${{ inputs.dawn_version }}
+        run: |
+          $dll = Get-Item "natives/dawn-windows/out/webgpu_dawn.dll"
+          $sha = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+          @(
+            "### webgpu_dawn.dll",
+            "",
+            "| field | value |",
+            "| --- | --- |",
+            "| jWebGPU version | $($env:DAWN_VERSION) |",
+            "| size | $('{0:N0}' -f $dll.Length) bytes |",
+            "| sha256 | $sha |",
+            "",
+            "Put in gradle.properties:",
+            "",
+            '```',
+            "dawn_windows_sha256 = $sha",
+            '```'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Publish as a release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          DAWN_VERSION: ${{ inputs.dawn_version }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          # A release may already exist for this tag (a re-run after a fix); create it only if not,
+          # and always overwrite the asset so the tag and the binary cannot drift apart.
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --notes "webgpu_dawn.dll linked from jWebGPU $($env:DAWN_VERSION)'s static Dawn. See natives/dawn-windows/build.ps1."
+          }
+          gh release upload $tag "natives/dawn-windows/out/webgpu_dawn.dll" --clobber

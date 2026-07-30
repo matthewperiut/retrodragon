@@ -54,7 +54,7 @@ public final class WebGPUSmokeTest {
 			long count = WGPUSupportedFeatures.featureCount(sf);
 			System.out.println("features   = " + count);
 			System.out.println("multidraw  = "
-				+ (has(sf, count, WGPUFeatureName_MultiDrawIndirect()) ? "yes" : "no"));
+				+ (has(sf, count, DawnFeatures.multiDrawIndirect()) ? "yes" : "no"));
 			// Device + queue: the objects every later stage actually builds on.
 			try (WebGPUContext ctx = WebGPUContext.create()) {
 				System.out.println("device     = ok (backend " + ctx.backendName() + ")");
@@ -63,9 +63,9 @@ public final class WebGPUSmokeTest {
 				// The adapter above is a separate, untoggled one, so reporting only that would
 				// measure the wrong thing.
 				System.out.println("ctx.features = " + ctx.features().size()
-					+ ", multidraw = " + ctx.hasFeature(WGPUFeatureName_MultiDrawIndirect()));
-				System.out.println("want multidraw = " + WGPUFeatureName_MultiDrawIndirect()
-					+ " (0x" + Integer.toHexString(WGPUFeatureName_MultiDrawIndirect()) + ")");
+					+ ", multidraw = " + ctx.hasFeature(DawnFeatures.multiDrawIndirect()));
+				System.out.println("want multidraw = " + DawnFeatures.multiDrawIndirect()
+					+ " (0x" + Integer.toHexString(DawnFeatures.multiDrawIndirect()) + ")");
 				StringBuilder ids = new StringBuilder("ctx.featureIds =");
 				for (int id : ctx.features()) {
 					ids.append(' ').append("0x").append(Integer.toHexString(id));

@@ -39,7 +39,28 @@ public final class FramePacing {
 	private FramePacing() {
 	}
 
+	/**
+	 * Forces a setting, for measuring outside the game.
+	 *
+	 * <p>{@code -Dretroperf.pacing=max|balanced|powersaver}. Without it the standalone harnesses fall
+	 * back to Balanced -- {@link GameOptions#client()} returns null when there is no Minecraft -- which
+	 * means vsync, which means every frame-loop measurement they take is really a measurement of the
+	 * display's refresh rate. That made the uncapped path, the one that matters for throughput, the
+	 * one path no benchmark could reach.
+	 *
+	 * <p>-1 when unset, so the game's own option still wins in the game.
+	 */
+	private static final int FORCED = switch (System.getProperty("retroperf.pacing", "")) {
+		case "max" -> MAX_FPS;
+		case "balanced" -> BALANCED;
+		case "powersaver" -> POWER_SAVER;
+		default -> -1;
+	};
+
 	private static int setting() {
+		if (FORCED >= 0) {
+			return FORCED;
+		}
 		Minecraft client = GameOptions.client();
 		if (client == null || client.options == null) {
 			return BALANCED;
