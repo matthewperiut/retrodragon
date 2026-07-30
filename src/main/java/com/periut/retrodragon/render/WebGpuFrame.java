@@ -260,7 +260,10 @@ public final class WebGpuFrame {
 	 */
 	public static void captureTerrain(com.periut.retrodragon.gpu.GpuBuffer buffer, int firstVertex,
 			int vertexCount) {
-		if (!active() || buffer == null || vertexCount <= 0) {
+		// Released buffers are rejected here as well as at bind time: a batch recorded against one is
+		// dead weight for the rest of the frame, and dropping it at the point the caller can still be
+		// identified is what makes "which section" answerable.
+		if (!active() || buffer == null || !buffer.valid() || vertexCount <= 0) {
 			return;
 		}
 		GlShim gl = ShimTracker.shim();

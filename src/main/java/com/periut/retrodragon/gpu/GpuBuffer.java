@@ -50,6 +50,18 @@ public final class GpuBuffer implements AutoCloseable {
 	}
 
 	/**
+	 * False before the first allocation and after {@link #close}.
+	 *
+	 * <p>Worth checking before binding: WebGPU reads a null buffer in {@code SetVertexBuffer} as
+	 * "unset this slot" rather than as an error, so a released buffer binds silently and the failure
+	 * surfaces on the following draw as "vertex buffer slot 0 ... was not set", naming a pipeline
+	 * that is perfectly fine.
+	 */
+	public boolean valid() {
+		return !buffer.equals(MemorySegment.NULL);
+	}
+
+	/**
 	 * Makes sure at least {@code bytes} fit, reallocating if not.
 	 *
 	 * @return true if the buffer was replaced -- bind groups referencing the old handle are stale and

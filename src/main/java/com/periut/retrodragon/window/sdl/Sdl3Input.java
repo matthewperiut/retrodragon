@@ -211,7 +211,10 @@ public final class Sdl3Input {
 			return;
 		}
 		grabbed = grab;
-		org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode(Sdl3Window.handle(), grab);
+		// Thread 0: relative mouse mode moves through Cocoa's cursor association, and the text input
+		// toggle below tears down an NSView. See setTextInput.
+		com.periut.retrodragon.window.MainThread.run(() ->
+			org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode(Sdl3Window.handle(), grab));
 		// Grabbed means no screen is open, which is exactly when characters are not wanted.
 		setTextInput(!grab);
 		// Deltas accumulated while switching modes describe the jump to/from the warp position, not
@@ -241,11 +244,20 @@ public final class Sdl3Input {
 		if (!Sdl3Window.isCreated()) {
 			return;
 		}
-		if (active) {
-			org.lwjgl.sdl.SDLKeyboard.SDL_StartTextInput(Sdl3Window.handle());
-		} else {
-			org.lwjgl.sdl.SDLKeyboard.SDL_StopTextInput(Sdl3Window.handle());
-		}
+		// Thread 0, like every other AppKit-touching SDL call. macOS backs text input with a real
+		// NSView (SDL's field editor): SDL_StopTextInput removes it from the window, which deactivates
+		// the NSTextInputContext and makes a synchronous XPC round trip to the input method server.
+		// That path asserts it is on the main thread and aborts the process if it is not --
+		// "-[HIRunLoopSemaphore wait:] has been invoked on a secondary thread". Beta calls this from
+		// the render thread every time a screen opens or closes, so unmarshalled it crashed on the
+		// first frame of world rendering.
+		com.periut.retrodragon.window.MainThread.run(() -> {
+			if (active) {
+				org.lwjgl.sdl.SDLKeyboard.SDL_StartTextInput(Sdl3Window.handle());
+			} else {
+				org.lwjgl.sdl.SDLKeyboard.SDL_StopTextInput(Sdl3Window.handle());
+			}
+		});
 	}
 
 	public static boolean isGrabbed() {
@@ -260,7 +272,9 @@ public final class Sdl3Input {
 		float perPoint = Sdl3Window.pixelsPerPoint();
 		float pointX = pixelX / perPoint;
 		float pointY = (Sdl3Window.height() - 1 - pixelY) / perPoint;
-		org.lwjgl.sdl.SDLMouse.SDL_WarpMouseInWindow(Sdl3Window.handle(), pointX, pointY);
+		// Thread 0: warping goes through Cocoa's cursor state, same rule as setGrabbed.
+		com.periut.retrodragon.window.MainThread.run(() ->
+			org.lwjgl.sdl.SDLMouse.SDL_WarpMouseInWindow(Sdl3Window.handle(), pointX, pointY));
 		cursorX = Math.round(pointX);
 		cursorY = Math.round(pointY);
 	}

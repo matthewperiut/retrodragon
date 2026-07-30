@@ -71,6 +71,13 @@ public final class ImmediateRenderer implements AutoCloseable {
 	private int batchesLastFrame;
 	/** Bind-group changes issued this frame; the count that per-section terrain would otherwise blow up. */
 	private int binds;
+	/**
+	 * Batches skipped this frame because their buffer was released after being captured.
+	 *
+	 * <p>A handful during a world change is normal -- the meshes really were freed. A steady count in
+	 * ordinary play means geometry is being dropped every frame, and the free is happening too early.
+	 */
+	private int dropped;
 
 	public ImmediateRenderer(WebGPUContext ctx) {
 		this.ctx = ctx;
@@ -95,6 +102,7 @@ public final class ImmediateRenderer implements AutoCloseable {
 		batchesLastFrame = list.batchCount();
 		drawsLastFrame = 0;
 		binds = 0;
+		dropped = 0;
 
 		if (list.batchCount() > 0) {
 			boolean moved = false;
@@ -138,6 +146,10 @@ public final class ImmediateRenderer implements AutoCloseable {
 				frame.endPass();
 			}
 		}
+		if (dropped > 0) {
+			com.periut.retrodragon.RetroDragon.detail(
+				"{} batches dropped: their buffer was released after being captured", dropped);
+		}
 		return drawsLastFrame;
 	}
 
@@ -167,9 +179,20 @@ public final class ImmediateRenderer implements AutoCloseable {
 			// copied into this frame's shared one. Rebinding only on a change keeps a run of
 			// sections from re-issuing the same call.
 			Object source = list.buffer(batch);
+			GpuBuffer buffer = source == null ? vertices : (GpuBuffer) source;
+			// A section's buffer can be released between the capture and this pass -- the game frees
+			// meshes mid-frame as sections are recycled, and world unload frees every one of them. The
+			// batch describes geometry that no longer exists, so it is dropped. Binding it instead
+			// would UNSET slot 0 (a null buffer is not an error to WebGPU) and the next draw would
+			// fail validation, taking the whole command buffer and therefore the whole frame with it.
+			if (!buffer.valid()) {
+				dropped++;
+				// Force the next batch to rebind: the slot now holds whatever the last valid batch set.
+				boundBuffer = this;
+				continue;
+			}
 			if (source != boundBuffer) {
 				boundBuffer = source;
-				GpuBuffer buffer = source == null ? vertices : (GpuBuffer) source;
 				wgpuRenderPassEncoderSetVertexBuffer(pass, 0, buffer.handle(), 0, buffer.capacity());
 			}
 
@@ -327,6 +350,11 @@ public final class ImmediateRenderer implements AutoCloseable {
 
 	public int bindsLastFrame() {
 		return binds;
+	}
+
+	/** See {@link #dropped}. */
+	public int droppedLastFrame() {
+		return dropped;
 	}
 
 	@Override

@@ -52,6 +52,14 @@ public final class TerrainShader {
 		if (broken || !Config.SHADER) {
 			return false;
 		}
+		// This is a GL program, and under WebGPU there is no GL to compile it with: the shim stubs
+		// glCompileShader and glGetShaderi returns GL_FALSE, so build() reported three errors about a
+		// shader that was never going to exist and then disabled itself for a backend that does not
+		// want it. The WebGPU path does this work in its own terrain pipeline instead -- the same
+		// atlas parameters go across as uniforms in WebGpuFrame.captureTerrain via TerrainAppearance.
+		if (RenderBackend.isWebGpu()) {
+			return false;
+		}
 		if (program == 0 && !build()) {
 			return false;
 		}
