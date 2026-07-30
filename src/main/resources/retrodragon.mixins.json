@@ -6,8 +6,10 @@
   "plugin": "com.periut.retrodragon.mixin.GlPlugin",
   "mixins": [],
   "client": [
+    "AnimatedTextureMixin",
     "BenchMixin",
     "BlockRendererMixin",
+    "GameOptionsMixin",
     "ChunkBuilderMixin",
     "TessellatorMixin",
     "WorldRendererMixin",

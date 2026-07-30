@@ -1,5 +1,6 @@
 package com.periut.retrodragon.shim;
 
+import com.periut.retrodragon.render.AnimatedMipmaps;
 import com.periut.retrodragon.render.Primitives;
 import com.periut.retrodragon.render.WebGpuFrame;
 
@@ -314,9 +315,24 @@ public final class GlBridge {
 		}
 	}
 
+	/**
+	 * The animated-texture seam. Every animation source reaches the atlas through here.
+	 *
+	 * <p>{@code level} used to be DROPPED, so a caller uploading a mip level wrote it over level 0 and
+	 * corrupted the sheet. Nothing hit that before -- beta's own per-level loop is behind a flag that
+	 * is false in its static initialiser and that the game never writes -- but it is what made the
+	 * animated tiles unfixable rather than merely stale.
+	 */
 	public static void glTexSubImage2D(int target, int level, int x, int y, int width, int height,
 			int format, int type, ByteBuffer pixels) {
-		WebGpuFrame.textures().update(shim().boundTexture(), x, y, width, height, pixels);
+		int name = shim().boundTexture();
+		WebGpuFrame.textures().update(name, level, x, y, width, height, pixels);
+		if (level == 0) {
+			// Level 0 landed; regenerate the levels underneath it for exactly this region. Doing it
+			// here rather than at any particular animator covers beta's binders, RetroAPI's mcmeta
+			// animations and any mod, because all of them arrive as this one call.
+			AnimatedMipmaps.regenerate(name, x, y, width, height, pixels);
+		}
 	}
 
 	// --- immediate mode ----------------------------------------------------------------------------

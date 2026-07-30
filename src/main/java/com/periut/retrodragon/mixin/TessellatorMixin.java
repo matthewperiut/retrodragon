@@ -241,6 +241,31 @@ public class TessellatorMixin {
 			ci.cancel();
 			return;
 		}
+		// GL backend: wide lines go through the SAME expander WebGPU uses, so the block outline is
+		// the same geometry on both. Here rather than in GlLineExpansion because this is the point
+		// where the int[] has not yet been copied into the NIO buffer -- the WebGPU branch above does
+		// the identical three lines for the identical reason.
+		if (vertexCount > 0 && com.periut.retrodragon.render.GlLineExpansion.isLineMode(mode)) {
+			intBuffer.clear();
+			intBuffer.put(buffer, 0, bufferPosition);
+			byteBuffer.position(0);
+			byteBuffer.limit(bufferPosition * 4);
+			if (com.periut.retrodragon.render.GlLineExpansion.draw(byteBuffer, vertexCount, mode,
+					hasColor)) {
+				// draw() would have done this on the way out; skipping it leaves the Tessellator
+				// believing it is still mid-batch and the next start() throws.
+				drawing = false;
+				addedVertexCount += vertexCount;
+				vertexCount = 0;
+				byteBuffer.clear();
+				bufferPosition = 0;
+				ci.cancel();
+				return;
+			}
+			// Not handled (one-pixel line, or WebGPU): fall through to vanilla draw(), which
+			// re-does the copy above. Two memcpys of a five-vertex outline, once per frame.
+			byteBuffer.clear();
+		}
 		DrawStats.countUncaptured();
 	}
 }

@@ -20,13 +20,17 @@ import com.periut.retrodragon.window.sdl.Sdl3Window;
  * <h2>Selection order</h2>
  *
  * <ol>
- *   <li>{@code -Dretroperf.backend=gl} -- GL, unconditionally.</li>
- *   <li>{@code -Dretroperf.backend=webgpu} -- WebGPU if a device comes up, ignoring the completeness
- *       gate. This is the switch for developing the backend: it is expected to render an incomplete
- *       frame.</li>
- *   <li>otherwise WebGPU if {@link Config#WEBGPU} is on, a device comes up, <em>and</em>
- *       {@link #FEATURE_COMPLETE} says this build can actually draw the game.</li>
- *   <li>otherwise GL.</li>
+ *   <li>{@code -Dretrodragon.backend} / {@code -Dretroperf.backend} = {@code gl} -- GL,
+ *       unconditionally.</li>
+ *   <li>the same property set to {@code webgpu} -- WebGPU if a device comes up, ignoring the
+ *       completeness gate. This is the switch for developing the backend: it is expected to render an
+ *       incomplete frame.</li>
+ *   <li>otherwise whatever {@link com.periut.retrodragon.RetroOptions#backend()} resolves to, which
+ *       is the {@code retrodragon.backend} line in options.txt, or the platform default -- GL on
+ *       Windows, WebGPU everywhere else.</li>
+ *   <li>a WebGPU request still falls back to GL unless {@link Config#WEBGPU} is on, a device comes
+ *       up, the window can supply a native surface, <em>and</em> {@link #FEATURE_COMPLETE} says this
+ *       build can actually draw the game.</li>
  * </ol>
  */
 public final class RenderBackend {
@@ -72,12 +76,24 @@ public final class RenderBackend {
 			return selected;
 		}
 
-		String forced = System.getProperty(PROPERTY, "").toLowerCase(java.util.Locale.ROOT);
-		if ("gl".equals(forced) || "opengl".equals(forced)) {
-			return settle(Api.GL, "forced by -D" + PROPERTY + "=gl");
+		// options.txt, read straight off disk: GameOptions does not exist yet at preLaunch.
+		if (!com.periut.retrodragon.RetroOptions.isLoaded()) {
+			com.periut.retrodragon.RetroOptions.loadFromGameDir();
+		}
+		// Both settings and where each came from, before anything acts on them. Neither is visible in
+		// any menu, so this line is the only way a bug report can say what the run was configured to
+		// do -- and "backend=gl (options.txt)" answers a question that "graphics: OpenGL" does not.
+		com.periut.retrodragon.RetroDragon.LOGGER.info("options: {}",
+			com.periut.retrodragon.RetroOptions.summary());
+		String requested = com.periut.retrodragon.RetroOptions.backend();
+		if ("gl".equals(requested)) {
+			return settle(Api.GL, "OpenGL requested (" + com.periut.retrodragon.RetroOptions.summary() + ")");
 		}
 
-		boolean forceWebGpu = "webgpu".equals(forced) || "wgpu".equals(forced) || "dawn".equals(forced);
+		// An explicit request for WebGPU also waives the completeness gate below, which is what makes
+		// -Dretroperf.backend=webgpu the switch for developing an incomplete backend.
+		boolean forceWebGpu = System.getProperty(PROPERTY) != null
+			|| System.getProperty("retrodragon.backend") != null;
 		if (!forceWebGpu && !Config.WEBGPU) {
 			return settle(Api.GL, "WebGPU disabled by config");
 		}

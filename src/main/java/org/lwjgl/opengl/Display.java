@@ -1016,6 +1016,14 @@ public final class Display {
 	private static int windowedX, windowedY, windowedWidth, windowedHeight;
 
 	public static void setFullscreen(boolean fullscreen) {
+		// Windows 11: retract the Mica backdrop before the window goes fullscreen and restore it on
+		// the way back. Left on, DWM composites the client area against a blurred desktop sample and
+		// every frame beta leaves below full alpha lifts toward it -- the washed-out fullscreen. See
+		// WindowsDisplayHelper.setBackdropEnabled. Backend-independent by construction: it is an
+		// attribute of the HWND, so it is done here rather than in either renderer.
+		if (OS.current() == OS.WINDOWS) {
+			WindowsDisplayHelper.setBackdropEnabled(!fullscreen);
+		}
 		if (SDL) {
 			long window = Sdl3Window.handle();
 			// Headless is a hidden window by definition; making it fullscreen would be meaningless

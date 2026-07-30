@@ -57,22 +57,22 @@ public final class Sdl3Window {
 	public static final String NO_GL_PROPERTY = "retrowindow.noGl";
 
 	/**
-	 * {@code -Dretrowindow.highDpi=true|false} -- whether the drawable matches the display's physical
-	 * pixels.
+	 * Whether the drawable matches the display's physical pixels.
 	 *
 	 * <p><b>Off means a blurry window on any Retina display.</b> Without
 	 * {@code SDL_WINDOW_HIGH_PIXEL_DENSITY} the backing surface stays at logical size -- 854x480 on a
-	 * 3024x1964 panel -- and the window server scales it up with a smooth filter. Every hard pixel
-	 * edge in the frame is softened, which looks exactly like anti-aliasing and cannot be fixed
-	 * anywhere inside the renderer, because it happens after the frame is finished. In a game drawn
-	 * from 16x16 pixel art that is the single most visible difference there is.
+	 * 3024x1964 panel -- and the window server scales it up. The RetroDragon window sets the layer's
+	 * scaling filter to nearest (see {@link #setNearestScalingFilter()}) so that upscale is blocky
+	 * rather than smoothed, but it is still an upscale.
 	 *
-	 * <p>Defaults to ON for a GL-free (WebGPU) window and OFF for a GL one. Not because GL wants the
-	 * blur, but because turning it on quadruples that backend's pixel count, and its performance
-	 * numbers and post-process sizing were all measured without it. Set the property to opt either
-	 * way.
+	 * <p>The setting itself now lives in {@link com.periut.retrodragon.RetroOptions} -- the
+	 * {@code retrodragon.retina} line in options.txt, defaulting to ON on every platform and both
+	 * backends, overridable with {@code -Dretrodragon.retina}. These two property names are the older
+	 * spellings and are still accepted.
 	 */
 	public static final String HIGH_DPI_PROPERTY = "retrowindow.highDpi";
+
+	public static final String RETINA_PROPERTY = "retroperf.retina";
 
 	private static long window;
 	private static long context;
@@ -112,10 +112,16 @@ public final class Sdl3Window {
 		return noGl;
 	}
 
-	/** See {@link #HIGH_DPI_PROPERTY}: defaults on without a GL context, off with one. */
+	/**
+	 * Whether the window is created with {@code SDL_WINDOW_HIGH_PIXEL_DENSITY}.
+	 *
+	 * <p>Delegates to {@link com.periut.retrodragon.RetroOptions#retina()}, which is the single place
+	 * the property, options.txt and the platform default are reconciled. Read live rather than cached,
+	 * and nothing downstream of window creation needs telling: they all read
+	 * {@link #pixelsPerPoint()}, which comes from SDL's own sizes.
+	 */
 	public static boolean highDpi() {
-		String property = System.getProperty(HIGH_DPI_PROPERTY);
-		return property == null ? noGl : !"false".equals(property);
+		return com.periut.retrodragon.RetroOptions.retina();
 	}
 
 	/**
@@ -307,7 +313,77 @@ public final class Sdl3Window {
 			metalView = 0L;
 			return false;
 		}
+		setNearestScalingFilter();
 		return true;
+	}
+
+	/**
+	 * {@code layer.magnificationFilter = kCAFilterNearest} -- point-samples the compositor's scaling.
+	 *
+	 * <p>It matters when {@link #highDpi()} is off. There, SDL leaves the layer's
+	 * {@code contentsScale} at 1.0, so the drawable is 854x480 while the layer occupies 854x480
+	 * POINTS -- 1708x960 physical pixels on a 2x panel. Core Animation makes up the difference, and
+	 * its default {@code kCAFilterLinear} blurs every hard edge in the frame.
+	 *
+	 * <p>That blur is invisible to the renderer: it happens in the window server, after present, on a
+	 * frame that is already finished, so no amount of nearest sampling inside the pipeline reaches it.
+	 * This is the only place it can be turned off. With nearest, a 1x drawable on a 2x display becomes
+	 * exact pixel doubling, which is what 16x16 pixel art wants and what makes a retina=false run
+	 * legible rather than merely fast.
+	 *
+	 * <p><b>Set unconditionally, not gated on {@link #highDpi()}.</b> At 1:1 the filter is simply
+	 * never consulted, so there is no configuration it makes worse -- and not gating it is what makes
+	 * dragging the window between a Retina and a non-Retina display correct with no case analysis.
+	 * A gate evaluated once at creation could not track the move anyway, and the frames that ARE
+	 * scaled are exactly the ones nobody plans for: {@link com.periut.retrodragon.render.WebGpuRenderer}
+	 * notes that Dawn reports Success for a CAMetalLayer whose window has already changed size, so a
+	 * stale drawable is silently scaled until the next frame's poll catches it. Those frames are now
+	 * blocky rather than blurry, which in this game is the house style.
+	 *
+	 * <p>Caveat, on any setting: under a FRACTIONAL display scale (macOS "More Space" modes give
+	 * ratios like 1.6x) nearest duplicates some rows and columns and not others. That unevenness is
+	 * inherent to point sampling, not a bug here -- it is what "no filtering" means at a non-integer
+	 * ratio.
+	 *
+	 * <p>The filter is named by an equal NSString rather than by dlsym'ing {@code kCAFilterNearest}
+	 * out of QuartzCore: Core Animation compares these by string value, and building one avoids
+	 * loading and dereferencing an exported constant for a seven-character literal.
+	 *
+	 * <p>Fails soft. A window that composites through a linear filter is the status quo, not a reason
+	 * to refuse to start.
+	 */
+	private static void setNearestScalingFilter() {
+		java.nio.ByteBuffer name = null;
+		try {
+			long objc_msgSend = org.lwjgl.system.macosx.ObjCRuntime.getLibrary()
+				.getFunctionAddress("objc_msgSend");
+			long nsStringClass = org.lwjgl.system.macosx.ObjCRuntime.objc_getClass("NSString");
+			long selStringWithUTF8 = org.lwjgl.system.macosx.ObjCRuntime
+				.sel_getUid("stringWithUTF8String:");
+			name = org.lwjgl.system.MemoryUtil.memASCII("nearest", true);
+			long filter = org.lwjgl.system.JNI.invokePPPP(nsStringClass, selStringWithUTF8,
+				org.lwjgl.system.MemoryUtil.memAddress(name), objc_msgSend);
+			if (filter == 0L) {
+				return;
+			}
+			// Both magnification (a 1x drawable on a 2x panel) and minification (a drawable larger
+			// than the layer, which is what a window dragged from a Retina to a non-Retina display
+			// presents until the next frame's size poll) -- either one softens the result.
+			org.lwjgl.system.JNI.invokePPPP(metalLayer,
+				org.lwjgl.system.macosx.ObjCRuntime.sel_getUid("setMagnificationFilter:"),
+				filter, objc_msgSend);
+			org.lwjgl.system.JNI.invokePPPP(metalLayer,
+				org.lwjgl.system.macosx.ObjCRuntime.sel_getUid("setMinificationFilter:"),
+				filter, objc_msgSend);
+			com.periut.retrodragon.RetroDragon.detail("CAMetalLayer scaling filter: nearest");
+		} catch (Throwable t) {
+			System.err.println("[RetroDragon] could not set the CAMetalLayer scaling filter,"
+				+ " the compositor will keep smoothing the upscale: " + t);
+		} finally {
+			if (name != null) {
+				org.lwjgl.system.MemoryUtil.memFree(name);
+			}
+		}
 	}
 
 	/**

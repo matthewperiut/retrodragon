@@ -80,16 +80,24 @@ public final class TextureStore implements AutoCloseable {
 		}
 	}
 
-	/** Stands in for {@code glTexSubImage2D}; used by the animated water/lava/fire tiles. */
-	public synchronized void update(int name, int x, int y, int width, int height, ByteBuffer rgba) {
+	/**
+	 * Stands in for {@code glTexSubImage2D}; used by the animated water/lava/fire tiles.
+	 *
+	 * <p>{@code level} is honoured rather than assumed to be 0. It used to be dropped, on the
+	 * reasoning that rebuilding a whole 256x256 chain at 20 Hz cost more than "tiles whose mips
+	 * barely move" were worth. Both halves of that were wrong: nothing has to rebuild the whole
+	 * sheet -- a tile's own chain is 8x8, 4x4, 2x2, 1x1 and the box filter never crosses a tile
+	 * boundary anyway -- and lava's mips do not barely move, they swing the full width of the
+	 * animation. Frozen at the load-time frame, distant lava stopped animating and sat at the wrong
+	 * colour. See {@link AnimatedMipmaps}.
+	 */
+	public synchronized void update(int name, int level, int x, int y, int width, int height,
+			ByteBuffer rgba) {
 		GpuTexture texture = textures.get(name);
-		if (texture == null || rgba == null) {
+		if (texture == null || rgba == null || level < 0 || level >= texture.mipLevels()) {
 			return;
 		}
-		texture.upload(0, x, y, width, height, rgba);
-		// Deliberately level 0 only. Beta's animated tiles update every tick; rebuilding a whole
-		// 256x256 chain at 20 Hz would cost more than the sub-pixel accuracy is worth, and the
-		// affected tiles are 16x16 regions whose mips barely move.
+		texture.upload(level, x, y, width, height, rgba);
 	}
 
 	/** Uploads a level explicitly, for callers that already hold a chain. */

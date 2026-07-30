@@ -97,7 +97,11 @@ final class WindowsDisplayHelper {
 			setAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE, currentDarkMode ? 1 : 0);
 
 			// Enable Mica backdrop (Windows 11 22H2+). Silently ignored on older builds.
-			setAttribute(DWMWA_SYSTEMBACKDROP_TYPE, 2);
+			// Tracked in backdropEnabled so setBackdropEnabled can put it back after fullscreen.
+			if (MICA) {
+				setAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW);
+				backdropEnabled = true;
+			}
 		} catch (Exception e) {
 			System.err.println("[Display] Failed to init Windows titlebar: " + e.getMessage());
 		}
@@ -130,5 +134,51 @@ final class WindowsDisplayHelper {
 	/** True once a DWM handle has been acquired; the SDL path uses it to skip dead work. */
 	static boolean isInitialized() {
 		return initialized;
+	}
+
+	/** {@code DWMSBT_NONE}. Setting the type back to Mica is what re-enables it. */
+	private static final int DWMSBT_NONE = 1;
+	private static final int DWMSBT_MAINWINDOW = 2;
+
+	/**
+	 * {@code -Dretrodragon.mica=false} disables the Mica backdrop outright.
+	 *
+	 * <p>Here because a backdrop is a compositing decision made by DWM about a window it does not
+	 * know is a game, and the escape hatch costs one property read.
+	 */
+	private static final boolean MICA = !"false".equals(System.getProperty("retrodragon.mica"));
+
+	private static boolean backdropEnabled;
+
+	/**
+	 * Turns the Mica backdrop off for the duration of fullscreen, and back on when the window
+	 * returns.
+	 *
+	 * <h2>Why fullscreen washes the colours out with it left on</h2>
+	 *
+	 * {@code DWMWA_SYSTEMBACKDROP_TYPE} tells DWM to draw a blurred, tinted sample of the desktop
+	 * BEHIND the window's client area and composite the window over it. That is a statement about the
+	 * whole window, not just the titlebar it was added for. Windowed, it is invisible: beta's frame
+	 * covers the client area and the backdrop only shows through the chrome.
+	 *
+	 * <p>Going borderless fullscreen changes how DWM composites the window, and a window that has
+	 * declared a system backdrop does not get the plain opaque path. Anything the frame leaves below
+	 * full alpha then blends toward a bright blurred wallpaper instead of being ignored -- and beta
+	 * leaves plenty: {@code Surface.configure} notes it "clears to alpha 0 constantly". The result is
+	 * a uniformly lifted, low-contrast image. It survives leaving fullscreen because the backdrop is a
+	 * persistent window attribute; nothing about restoring the window retracts it.
+	 *
+	 * <p>This is also why the symptom does not depend on the renderer: it is a DWM property of the
+	 * HWND, set before either backend has drawn anything, so GL and WebGPU wash out identically.
+	 *
+	 * <p>Toggling rather than removing Mica keeps the translucent titlebar it was added for, which is
+	 * only ever visible in the windowed state anyway -- a fullscreen window has no titlebar to tint.
+	 */
+	static void setBackdropEnabled(boolean enabled) {
+		if (!initialized || !MICA || enabled == backdropEnabled) {
+			return;
+		}
+		backdropEnabled = enabled;
+		setAttribute(DWMWA_SYSTEMBACKDROP_TYPE, enabled ? DWMSBT_MAINWINDOW : DWMSBT_NONE);
 	}
 }
