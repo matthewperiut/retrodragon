@@ -62,7 +62,16 @@ void main() {
         vec2 inset = (exp2(lod) * 0.5) / atlasSize;
         lo = tileOrigin + inset;
         hi = tileOrigin + tileSize - inset;
-        fp = vec2(density) * tileSize; // pixel footprint in UV
+        // Pixel footprint in UV, bounded by the mip texel actually being sampled.
+        //
+        // density is ISOTROPIC -- one max() over both screen derivatives -- so on a surface seen at a
+        // grazing angle it over-estimates the footprint without bound, while lod stops climbing at
+        // maxLod. Past that point the four RGSS taps are offset by multiple TILES, every one of them
+        // clamps to a corner of lo/hi, and the surface reads as a flat wrong-coloured sliver instead
+        // of its own texture. Capping fp at exp2(lod) texels keeps the taps inside the texel the LOD
+        // already chose; it is exactly a no-op wherever lod is not saturated, since there
+        // exp2(lod) == texelsPerPixel by construction.
+        fp = min(vec2(density) * tileSize, exp2(lod) / atlasSize);
     }
 
     vec4 texel;
