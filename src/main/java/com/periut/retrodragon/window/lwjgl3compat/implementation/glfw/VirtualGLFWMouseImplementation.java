@@ -429,11 +429,11 @@ public class VirtualGLFWMouseImplementation implements MouseImplementation {
 		private InputStream getArrowCursor() throws IOException {
 			Path theme = XDGPathResolver.getIconTheme("cursors/left_ptr"); // load the arrow pointer cursor from the selected theme
 			if (theme != null) {
-				LOGGER.info("Loading system cursor: " + theme);
+				LOGGER.debug("Loading system cursor: " + theme);
 				return Files.newInputStream(theme);
 			}
 
-			LOGGER.info("Falling back to packaged cursor");
+			LOGGER.debug("Falling back to packaged cursor");
 
 			return this.getClass().getResourceAsStream("/assets/virtual_cursor/default");
 		}

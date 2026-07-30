@@ -96,7 +96,7 @@ public final class WebGpuRenderer implements AutoCloseable {
 		if (surface.presentMode() != wanted) {
 			// A silent fallback to Fifo is indistinguishable from Balanced on screen, so say so
 			// rather than leaving "Max FPS behaves exactly like vsync" to be puzzled over.
-			com.periut.retrodragon.RetroDragon.LOGGER.info(
+			com.periut.retrodragon.RetroDragon.LOGGER.warn(
 				"present mode {} unsupported by this surface; using {}", wanted, surface.presentMode());
 		}
 		if (sizeChanged) {

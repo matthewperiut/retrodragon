@@ -230,7 +230,7 @@ public final class BlockAtlas {
 			+ (grid ? " grid " + (width / pitch) + "x" + (width / pitch) + " of " + pitch : " stitched");
 		if (!summary.equals(reported)) {
 			reported = summary;
-			RetroDragon.LOGGER.info("block atlas: {}", summary);
+			RetroDragon.detail("block atlas: {}", summary);
 		}
 	}
 
@@ -341,7 +341,7 @@ public final class BlockAtlas {
 				// only reported, and the decision that matters -- a stitched atlas has no grid -- was
 				// made from the mod being loaded at all.
 				broken = true;
-				RetroDragon.LOGGER.info("stationapi atlas size unavailable ({}); its atlas is"
+				RetroDragon.detail("stationapi atlas size unavailable ({}); its atlas is"
 					+ " stitched either way, which is all the renderer needs to know", t.toString());
 				return false;
 			}

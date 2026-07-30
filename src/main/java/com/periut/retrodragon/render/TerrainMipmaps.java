@@ -92,6 +92,6 @@ public final class TerrainMipmaps {
 	}
 
 	public static void logOnce(int width, int height) {
-		RetroDragon.LOGGER.info("mipmapped atlas {}x{} ({} levels)", width, height, LEVELS);
+		RetroDragon.detail("mipmapped atlas {}x{} ({} levels)", width, height, LEVELS);
 	}
 }

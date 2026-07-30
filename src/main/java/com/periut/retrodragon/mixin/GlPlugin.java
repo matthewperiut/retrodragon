@@ -116,7 +116,7 @@ public class GlPlugin implements IMixinConfigPlugin {
 		}
 		if (!reported || forwarded > 0) {
 			reported = true;
-			RetroDragon.LOGGER.info("{}: {} entry points routed to the WebGPU shim, {} neutralised",
+			RetroDragon.detail("{}: {} entry points routed to the WebGPU shim, {} neutralised",
 				targetClassName, forwarded, stubbed);
 		}
 	}

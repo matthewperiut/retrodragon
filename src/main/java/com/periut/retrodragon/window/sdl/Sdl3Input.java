@@ -212,10 +212,40 @@ public final class Sdl3Input {
 		}
 		grabbed = grab;
 		org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode(Sdl3Window.handle(), grab);
+		// Grabbed means no screen is open, which is exactly when characters are not wanted.
+		setTextInput(!grab);
 		// Deltas accumulated while switching modes describe the jump to/from the warp position, not
 		// player intent; dropping them stops the view snapping on every menu open and close.
 		deltaX = 0;
 		deltaY = 0;
+	}
+
+	/**
+	 * Turns SDL's text input on or off for the window.
+	 *
+	 * <p><b>This is what made typing work at all.</b> SDL3 delivers {@code SDL_EVENT_TEXT_INPUT} only
+	 * while text input is ACTIVE, and -- unlike SDL2, which LWJGL 2's behaviour effectively matched --
+	 * it starts INACTIVE. Nothing ever turned it on, so the character events beta needs were simply
+	 * never generated: every key arrived with {@code '\0'} attached, and since
+	 * {@code GuiScreen.keyTyped} decides what to append from the CHARACTER, chat and signs took key
+	 * presses and typed nothing. Movement and hotkeys were unaffected, because those read key codes.
+	 *
+	 * <p>Tracked against the pointer grab rather than left on permanently. An active text input
+	 * activates the platform IME, and a CJK candidate window opening because the player held W is a
+	 * worse bug than the one being fixed -- which is precisely why SDL3 changed the default. Beta
+	 * grabs the pointer exactly when no screen is open ({@code displayGuiScreen} ->
+	 * {@code setIngameNotInFocus} -> {@code Mouse.setGrabbed(false)}), so the grab state already says
+	 * "a GUI is up" for every screen, including screens belonging to mods.
+	 */
+	static void setTextInput(boolean active) {
+		if (!Sdl3Window.isCreated()) {
+			return;
+		}
+		if (active) {
+			org.lwjgl.sdl.SDLKeyboard.SDL_StartTextInput(Sdl3Window.handle());
+		} else {
+			org.lwjgl.sdl.SDLKeyboard.SDL_StopTextInput(Sdl3Window.handle());
+		}
 	}
 
 	public static boolean isGrabbed() {

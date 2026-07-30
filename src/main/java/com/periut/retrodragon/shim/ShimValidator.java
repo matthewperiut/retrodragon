@@ -92,7 +92,7 @@ public final class ShimValidator {
 		GL11.glPopMatrix();
 
 		if (failures == 0) {
-			RetroDragon.LOGGER.info("shim validation OK -- matrix maths matches real GL on all 9 checks");
+			RetroDragon.detail("shim validation OK -- matrix maths matches real GL on all 9 checks");
 		} else {
 			RetroDragon.LOGGER.error("shim validation FAILED on {} check(s) -- see above", failures);
 		}

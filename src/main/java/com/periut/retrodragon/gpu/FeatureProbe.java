@@ -24,7 +24,7 @@ public final class FeatureProbe {
 
 	public static void main(String[] args) {
 		try (WebGPUContext ctx = WebGPUContext.create()) {
-			System.out.println("backend = " + ctx.backendName());
+			System.out.println("backend = " + ctx.apiSummary());
 			java.util.List<Integer> features = ctx.features();
 			System.out.println("count   = " + features.size());
 			for (int feature : features) {

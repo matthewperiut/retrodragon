@@ -295,6 +295,12 @@ public final class WebGpuFrame {
 	/** {@code -Dretroperf.dumpFrame=N} logs every batch of frame N in beta's own vertex format. */
 	private static final long DUMP_FRAME = Long.getLong("retroperf.dumpFrame", -1L);
 
+	/**
+	 * {@code -Dretroperf.statsFrames=N} -- how far into the run the per-frame stats line keeps
+	 * reporting. Only consulted under {@code -Dretroperf.verbose=true}; 0 turns it off entirely.
+	 */
+	private static final long STATS_FRAMES = Long.getLong("retroperf.statsFrames", 600L);
+
 	/** Submits and presents everything recorded since the last call. */
 	public static synchronized void present() {
 		if (!initialized) {
@@ -321,9 +327,10 @@ public final class WebGpuFrame {
 		// Clean exit lives in FrameTimer, which ticks on both backends -- a comparison run has to end
 		// the same way whichever one is live.
 
-		// Every 60 frames rather than every frame: enough to see the shape of a frame and notice it
-		// going empty, without the log becoming the bottleneck.
-		if (frames % 60 == 1) {
+		// Every 60 frames, and only for the first STATS_FRAMES of them: enough to see the shape of a
+		// frame settle and notice it coming out empty, after which it is the same line forever. A
+		// session used to end with thousands of copies of it, which is how a log stops being read.
+		if (RetroDragon.VERBOSE && frames <= STATS_FRAMES && frames % 60 == 1) {
 			RetroDragon.LOGGER.info("frame {}: {} draws ({} binds), {} vertices, {} passes,"
 					+ " {} textures, {} pipelines, {}, world AA {}",
 				frames, lastDraws, immediate.bindsLastFrame(), vertices, segments,

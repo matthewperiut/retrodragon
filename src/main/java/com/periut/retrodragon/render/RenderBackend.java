@@ -112,7 +112,7 @@ public final class RenderBackend {
 		// And the surface is released BEFORE the window it was created over. Getting this backwards
 		// leaves macOS's render server waiting on a drawable that never comes back.
 		Sdl3Window.setShutdownHook(WebGpuFrame::shutdown);
-		return settle(Api.WEBGPU, "WebGPU on " + GpuBackend.context().backendName()
+		return settle(Api.WEBGPU, GpuBackend.context().apiSummary()
 			+ (forceWebGpu && !FEATURE_COMPLETE ? " (forced; expect an incomplete frame)" : ""));
 	}
 
@@ -123,7 +123,10 @@ public final class RenderBackend {
 		// builds any: a buffer packed four-to-a-quad and drawn as a triangle list is garbage.
 		QuadVertices.select(api == Api.WEBGPU);
 		TerrainVertex.select(api == Api.WEBGPU);
-		System.out.println("[RetroDragon] render backend = " + api + " -- " + why);
+		// Through the logger, not System.out: this is the one line that says which graphics API the
+		// run is actually on, and it has to be in the log file a bug report attaches.
+		com.periut.retrodragon.RetroDragon.LOGGER.info("graphics: {}",
+			api == Api.WEBGPU ? why : "OpenGL (LWJGL) -- " + why);
 		return api;
 	}
 

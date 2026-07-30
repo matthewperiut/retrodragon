@@ -65,7 +65,7 @@ public final class TerrainArena {
 			GpuBuffer buffer = GpuBuffer.sized(GpuBackend.context(),
 				Flags.BUFFER_USAGE_VERTEX, "retrodragon-terrain-arena", bytes);
 			instance = new TerrainArena(buffer, new ArenaAllocator((int) (bytes / STRIDE)));
-			com.periut.retrodragon.RetroDragon.LOGGER.info(
+			com.periut.retrodragon.RetroDragon.detail(
 				"terrain arena: {} MB, {} vertices", bytes >> 20, bytes / STRIDE);
 		} catch (RuntimeException e) {
 			// Never fatal: without an arena every section keeps its own buffer, which is the

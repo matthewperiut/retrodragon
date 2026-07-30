@@ -156,14 +156,21 @@ public final class Sdl3Window {
 		// Thread 0 keeps the Cocoa run loop serviced from here on, so window close, resize and drag
 		// stay live even when the game thread is not pumping (notably during shutdown).
 		com.periut.retrodragon.window.MainThread.setIdleTask(org.lwjgl.sdl.SDLEvents::SDL_PumpEvents);
-		System.out.println("[RetroDragon] SDL3 " + SDLVideo.SDL_GetCurrentVideoDriver()
-			+ (noGl
+		// The initial state is "no world, so no pointer grab" -- the title screen and its menus, all of
+		// which take typed text. Sdl3Input.setGrabbed tracks it from here; without this seed it would
+		// never fire, because its first call is setGrabbed(false) against an already-false field.
+		Sdl3Input.setTextInput(true);
+		// Startup, so it survives the quiet default -- and through the logger, because the GL version
+		// string is the other half of "which graphics API is this run actually on".
+		com.periut.retrodragon.RetroDragon.LOGGER.info("window: SDL3 {}{}, {}x{} px at {}x{}{}",
+			SDLVideo.SDL_GetCurrentVideoDriver(),
+			noGl
 				? ", no GL context (WebGPU surface"
 					+ (metalLayer != 0L ? " via CAMetalLayer" : "") + ")"
-				: ", GL " + org.lwjgl.opengl.GL11.glGetString(org.lwjgl.opengl.GL11.GL_VERSION))
-			+ ", " + width() + "x" + height() + " px at " + pixelsPerPoint() + "x"
-			+ (hidden ? " (headless)" : "")
-			+ (com.periut.retrodragon.window.MainThread.available() ? " (window on thread 0)" : ""));
+				: ", GL " + org.lwjgl.opengl.GL11.glGetString(org.lwjgl.opengl.GL11.GL_VERSION),
+			width(), height(), pixelsPerPoint(),
+			hidden ? " (headless)" : "",
+			com.periut.retrodragon.window.MainThread.available() ? " (window on thread 0)" : "");
 		return true;
 	}
 

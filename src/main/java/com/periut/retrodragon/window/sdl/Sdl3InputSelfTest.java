@@ -35,6 +35,7 @@ public final class Sdl3InputSelfTest {
 		int failures = 0;
 		failures += checkMouseButton();
 		failures += checkKey();
+		failures += checkTextInput();
 		failures += checkCoordinateMapping();
 
 		if (failures == 0) {
@@ -95,6 +96,64 @@ public final class Sdl3InputSelfTest {
 		if (!org.lwjgl.input.Keyboard.isKeyDown(expected)) {
 			failures += fail("isKeyDown(KEY_W)=false after a press -- held state is not tracked");
 		}
+		return failures;
+	}
+
+	/**
+	 * Typing: text input must be ACTIVE, and the character must reach beta on an event it will read.
+	 *
+	 * <p>Two separate failures, which is why both halves are checked. SDL3 starts text input off and
+	 * emits no {@code SDL_EVENT_TEXT_INPUT} at all until it is started -- that is invisible from a
+	 * synthetic event, because pushing one onto the queue bypasses the gate, so the flag is asserted
+	 * directly. And {@code GuiScreen} only calls {@code keyTyped} when {@code getEventKeyState()} is
+	 * true, so a character delivered on a released-key event would be dropped.
+	 */
+	private static int checkTextInput() {
+		int failures = 0;
+		if (!org.lwjgl.sdl.SDLKeyboard.SDL_TextInputActive(Sdl3Window.handle())) {
+			failures += fail("SDL_TextInputActive=false -- SDL3 generates no SDL_EVENT_TEXT_INPUT,"
+				+ " so chat and signs receive '\\0' for every key");
+		}
+
+		drain();
+		// Off-heap and freed only after the pump, NOT stack-allocated: SDL_PushEvent copies the event
+		// struct but not the string it points at, so a stack buffer is already dead by the time the
+		// pump reads it -- which showed up here as no event arriving at all.
+		java.nio.ByteBuffer text = org.lwjgl.system.MemoryUtil.memUTF8("a");
+		try (SDL_Event event = SDL_Event.calloc()) {
+			event.type(SDLEvents.SDL_EVENT_TEXT_INPUT);
+			event.text().text(text);
+			SDLEvents.SDL_PushEvent(event);
+			Sdl3Events.pump();
+		} finally {
+			org.lwjgl.system.MemoryUtil.memFree(text);
+		}
+
+		if (!org.lwjgl.input.Keyboard.next()) {
+			return failures + fail("Keyboard.next() saw no event after a synthetic text input");
+		}
+		if (org.lwjgl.input.Keyboard.getEventCharacter() != 'a') {
+			failures += fail("getEventCharacter()='" + org.lwjgl.input.Keyboard.getEventCharacter()
+				+ "', expected 'a'");
+		}
+		if (!org.lwjgl.input.Keyboard.getEventKeyState()) {
+			failures += fail("getEventKeyState()=false on a character event -- GuiScreen skips keyTyped");
+		}
+
+		// The coupling itself: grabbed means no screen is open, so text input follows the grab
+		// inverted. Restored afterwards, because the game is mid-run and owns this state.
+		boolean wasGrabbed = Sdl3Input.isGrabbed();
+		Sdl3Input.setGrabbed(true);
+		if (org.lwjgl.sdl.SDLKeyboard.SDL_TextInputActive(Sdl3Window.handle())) {
+			failures += fail("text input still active while the pointer is grabbed -- the IME stays"
+				+ " armed during play");
+		}
+		Sdl3Input.setGrabbed(false);
+		if (!org.lwjgl.sdl.SDLKeyboard.SDL_TextInputActive(Sdl3Window.handle())) {
+			failures += fail("text input not re-armed on ungrab -- typing breaks in every screen"
+				+ " opened from inside the world");
+		}
+		Sdl3Input.setGrabbed(wasGrabbed);
 		return failures;
 	}
 

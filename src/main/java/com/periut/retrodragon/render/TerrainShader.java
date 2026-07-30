@@ -100,7 +100,7 @@ public final class TerrainShader {
 			uMaxLod = GL20.glGetUniformLocation(program, "maxLod");
 			uRgss = GL20.glGetUniformLocation(program, "rgss");
 			uFogMode = GL20.glGetUniformLocation(program, "fogMode");
-			RetroDragon.LOGGER.info("terrain shader active");
+			RetroDragon.detail("terrain shader active");
 			return true;
 		} catch (Throwable t) {
 			return fail(String.valueOf(t));

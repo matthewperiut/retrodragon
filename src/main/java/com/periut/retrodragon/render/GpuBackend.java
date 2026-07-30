@@ -37,15 +37,16 @@ public final class GpuBackend {
 			status = "disabled by config";
 			return;
 		}
+		// Neither outcome is logged here: RenderBackend.settle() is the only caller and reports the
+		// API that was actually settled on, status and all. Two lines for one decision is how the
+		// startup log got noisy.
 		try {
 			context = WebGPUContext.create();
 			status = "ready on " + context.backendName();
-			System.out.println("[RetroDragon] WebGPU " + status);
 		} catch (Throwable t) {
 			// Throwable, not Exception: a missing or mismatched native surfaces as
 			// UnsatisfiedLinkError, which is exactly the case that must not take the game down.
 			status = "unavailable (" + t.getClass().getSimpleName() + ": " + t.getMessage() + ")";
-			System.out.println("[RetroDragon] WebGPU " + status + " -- continuing on OpenGL");
 			context = null;
 		}
 	}

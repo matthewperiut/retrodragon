@@ -138,7 +138,7 @@ public final class AntiAliasing {
 			unavailable = true;
 			return false;
 		}
-		RetroDragon.LOGGER.info("anti-aliasing: {}x MSAA at {}x{}{}", samples, width, height,
+		RetroDragon.detail("anti-aliasing: {}x MSAA at {}x{}{}", samples, width, height,
 			Config.ALPHA_TO_COVERAGE ? " + alpha-to-coverage" : "");
 		return true;
 	}

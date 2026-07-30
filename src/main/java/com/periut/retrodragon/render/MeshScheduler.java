@@ -51,7 +51,7 @@ public final class MeshScheduler {
 				worker.setPriority(Thread.NORM_PRIORITY - 1);
 				worker.start();
 			}
-			RetroDragon.LOGGER.info("async meshing on, {} worker(s)", THREADS);
+			RetroDragon.detail("async meshing on, {} worker(s)", THREADS);
 		}
 		return true;
 	}

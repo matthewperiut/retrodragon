@@ -41,6 +41,7 @@ public final class WebGPUContext implements AutoCloseable {
 	private MemorySegment device = MemorySegment.NULL;
 	private MemorySegment queue = MemorySegment.NULL;
 	private int backendType = -1;
+	private String adapterName = "unknown adapter";
 
 	private WebGPUContext() {
 	}
@@ -72,12 +73,30 @@ public final class WebGPUContext implements AutoCloseable {
 		MemorySegment info = WGPUAdapterInfo.allocate(arena);
 		wgpuAdapterGetInfo(adapter, info);
 		backendType = WGPUAdapterInfo.backendType(info);
+		// Copied out now, not lazily: the strings belong to the adapter info struct, and reading them
+		// after it goes out of scope is a use-after-free rather than a wrong name.
+		String name = readMessage(WGPUAdapterInfo.device(info));
+		if (!name.isEmpty()) {
+			adapterName = name;
+		}
 
 		device = awaitDevice();
 		queue = wgpuDeviceGetQueue(device);
 		if (queue.equals(MemorySegment.NULL)) {
 			throw new IllegalStateException("wgpuDeviceGetQueue returned NULL");
 		}
+
+		// Once, here, rather than per frame in markFrameSubmitted -- see the field comments for what
+		// per-frame cost this: an upcall stub is a code blob, and 300k of them end the run.
+		workDoneInfo = WGPUQueueWorkDoneCallbackInfo.allocate(arena);
+		WGPUQueueWorkDoneCallbackInfo.mode(workDoneInfo, WGPUCallbackMode_AllowProcessEvents());
+		WGPUQueueWorkDoneCallbackInfo.callback(workDoneInfo,
+			WGPUQueueWorkDoneCallback.allocate(
+				(status, message, u1, u2) -> inFlight.decrementAndGet(), arena));
+		// Sized from the descriptor rather than a guess, so a WGPUFuture that grows cannot overflow it.
+		MemorySegment future = arena.allocate(
+			wgpuQueueOnSubmittedWorkDone$descriptor().returnLayout().orElseThrow());
+		futureSink = (byteSize, byteAlignment) -> future;
 	}
 
 	private MemorySegment instanceDescriptor() {
@@ -288,18 +307,40 @@ public final class WebGPUContext implements AutoCloseable {
 		new java.util.concurrent.atomic.AtomicInteger();
 
 	/**
+	 * The work-done callback info, built once in {@link #init} and handed to Dawn every frame.
+	 *
+	 * <p><b>This used to be rebuilt per frame, and that was a leak with teeth.</b>
+	 * {@code WGPUQueueWorkDoneCallback.allocate} is {@code Linker.upcallStub}, which is a JIT code
+	 * blob, not heap -- and allocating it from this context's long-lived arena means it lives until
+	 * the context closes. One per frame fills the whole 240 MB CodeCache in ~300k frames, which on
+	 * the title screen at an uncapped 5000 fps is under a minute. The JIT shuts off first
+	 * ("CodeHeap is full. Compiler has been disabled"), and then the next stub allocation anywhere in
+	 * the JVM throws {@code OutOfMemoryError} -- which beta catches and reports as
+	 * "Minecraft has run out of memory", pointing at the heap, which was never the problem.
+	 *
+	 * <p>One stub is all that was ever needed: it closes over nothing but {@link #inFlight} and does
+	 * the same thing every frame. Same for the info struct beside it -- another ~32 bytes of native
+	 * memory a frame that nothing ever freed.
+	 */
+	private MemorySegment workDoneInfo = MemorySegment.NULL;
+
+	/**
+	 * Scratch for the {@code WGPUFuture} that {@code wgpuQueueOnSubmittedWorkDone} returns by value.
+	 *
+	 * <p>Nothing reads it, but FFM has to put it somewhere, and the somewhere is whatever allocator
+	 * is passed -- so passing {@link #arena} leaked that too, every frame. Reusing one segment is
+	 * safe precisely because the value is never read.
+	 */
+	private java.lang.foreign.SegmentAllocator futureSink;
+
+	/**
 	 * Registers a completion callback for everything submitted so far, and counts it as in flight.
 	 *
 	 * <p>Call once per frame, after submitting. Pairs with {@link #awaitFramesInFlight}.
 	 */
 	public void markFrameSubmitted() {
 		inFlight.incrementAndGet();
-		MemorySegment info = WGPUQueueWorkDoneCallbackInfo.allocate(arena);
-		WGPUQueueWorkDoneCallbackInfo.mode(info, WGPUCallbackMode_AllowProcessEvents());
-		WGPUQueueWorkDoneCallbackInfo.callback(info,
-			WGPUQueueWorkDoneCallback.allocate(
-				(status, message, u1, u2) -> inFlight.decrementAndGet(), arena));
-		wgpuQueueOnSubmittedWorkDone(arena, queue, info);
+		wgpuQueueOnSubmittedWorkDone(futureSink, queue, workDoneInfo);
 	}
 
 	/**
@@ -389,6 +430,20 @@ public final class WebGPUContext implements AutoCloseable {
 		return backendType;
 	}
 
+	/**
+	 * The native API Dawn resolved to. Nothing here chooses it -- Dawn picks its default backend per
+	 * platform, which in practice is:
+	 *
+	 * <pre>
+	 *   macOS    Metal
+	 *   Windows  D3D12
+	 *   Linux    Vulkan
+	 * </pre>
+	 *
+	 * <p>OpenGL/OpenGLES are Dawn fallbacks it will not pick while a Vulkan driver is present, so
+	 * seeing one of those on Linux means the Vulkan loader found no device. Logged at startup rather
+	 * than assumed, because "which API is this run on" is the first question any GPU bug asks.
+	 */
 	public String backendName() {
 		if (backendType == WGPUBackendType_Metal()) return "Metal";
 		if (backendType == WGPUBackendType_Vulkan()) return "Vulkan";
@@ -396,6 +451,16 @@ public final class WebGPUContext implements AutoCloseable {
 		if (backendType == WGPUBackendType_OpenGL()) return "OpenGL";
 		if (backendType == WGPUBackendType_OpenGLES()) return "OpenGLES";
 		return "unknown(" + backendType + ")";
+	}
+
+	/** What the adapter calls itself, e.g. {@code "Apple M2"} or {@code "AMD Radeon 780M"}. */
+	public String adapterName() {
+		return adapterName;
+	}
+
+	/** The startup one-liner: the native API Dawn picked, and on what. */
+	public String apiSummary() {
+		return "WebGPU (Dawn) on " + backendName() + " -- " + adapterName;
 	}
 
 	public boolean hasFeature(int feature) {

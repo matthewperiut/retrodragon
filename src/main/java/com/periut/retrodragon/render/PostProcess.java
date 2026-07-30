@@ -156,7 +156,7 @@ public final class PostProcess {
 			broken = true;
 			return false;
 		}
-		RetroDragon.LOGGER.info("FXAA enabled at {}x{}", width, height);
+		RetroDragon.detail("FXAA enabled at {}x{}", width, height);
 		return true;
 	}
 
