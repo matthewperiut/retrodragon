@@ -1,3 +1,7 @@
 accessWidener v2 named
 
 accessible field net/minecraft/client/Minecraft fullscreen Z
+
+# So mesh threads can have a Tessellator of their own; see render/MeshTessellator. The constructor
+# only allocates an int[] and a direct ByteBuffer -- no GL, no global registration.
+accessible method net/minecraft/client/render/Tessellator <init> (I)V

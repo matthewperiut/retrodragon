@@ -170,6 +170,36 @@ public final class VertexSink {
 			}
 		}
 
+		store(x, y, z);
+	}
+
+	/**
+	 * Appends vertices already packed in beta's Tessellator layout -- 8 ints, position 3f at 0, uv 2f
+	 * at 3, colour at 5, normal at 6 -- without running the quad split, because the writer has
+	 * already produced whatever shape this sink was begun in.
+	 *
+	 * <p>{@code off*} is the Tessellator offset the writer baked into those positions; it is removed
+	 * here so the sink can apply its own, which is the same value read from its own copy.
+	 *
+	 * <p>{@code addedVertexCount} is deliberately left alone: it is the split's phase counter, and
+	 * vertices that did not go through the split must not shift the phase of ones that do.
+	 */
+	public void appendPacked(int[] src, int from, int count, double offX, double offY, double offZ) {
+		for (int i = 0; i < count; i++) {
+			int p = from + i * STRIDE_INTS;
+			this.u = Float.intBitsToFloat(src[p + 3]);
+			this.v = Float.intBitsToFloat(src[p + 4]);
+			this.color = src[p + 5];
+			this.normal = src[p + 6];
+			store(Float.intBitsToFloat(src[p]) - offX,
+				Float.intBitsToFloat(src[p + 1]) - offY,
+				Float.intBitsToFloat(src[p + 2]) - offZ);
+		}
+	}
+
+	/** The write itself, shared by the Tessellator path and {@link #appendPacked}. */
+	private void store(double x, double y, double z) {
+		int stride = this.strideInts;
 		grow(stride);
 		this.buf[this.pos + 0] = Float.floatToRawIntBits((float) ((x + this.offX) * this.scale + this.biasX));
 		this.buf[this.pos + 1] = Float.floatToRawIntBits((float) ((y + this.offY) * this.scale + this.biasY));
@@ -275,6 +305,7 @@ public final class VertexSink {
 			}
 		}
 
+		failures += checkAppendPacked();
 		failures += checkQuadMode();
 		failures += checkCompactPacking();
 		failures += checkTileBoundaries();
@@ -285,6 +316,66 @@ public final class VertexSink {
 		}
 		System.out.println("VertexSink self-check OK: quad split preserves the face normal"
 			+ " across all 6 vertices");
+	}
+
+	/**
+	 * A quad handed over as raw Tessellator words survives, and does NOT get split a second time.
+	 *
+	 * <p>This is the path a content API's direct buffer writes take (see {@link RetroTessellator}).
+	 * Two things can silently ruin it: running the quad split over vertices the writer already split,
+	 * which turns six into nine and shears every face; and forgetting that the writer baked the
+	 * Tessellator's offset into the positions, which puts the geometry a section away from where it
+	 * belongs. Both are checked, with an offset and a bias that are non-zero and different from each
+	 * other so neither can cancel out.
+	 */
+	private static int checkAppendPacked() {
+		VertexSink sink = new VertexSink();
+		sink.begin(10.0, 20.0, 30.0, 2.0, 1.0, 2.0, 3.0);
+
+		// One quad as the writer leaves it: four vertices, 8 ints each, positions already carrying
+		// the Tessellator's own offset (7, 8, 9).
+		int[] packed = new int[4 * STRIDE_INTS];
+		for (int i = 0; i < 4; i++) {
+			int p = i * STRIDE_INTS;
+			packed[p] = Float.floatToRawIntBits(i + 7.0F);
+			packed[p + 1] = Float.floatToRawIntBits(8.0F);
+			packed[p + 2] = Float.floatToRawIntBits(9.0F);
+			packed[p + 3] = Float.floatToRawIntBits(0.25F);
+			packed[p + 4] = Float.floatToRawIntBits(0.75F);
+			packed[p + 5] = 0x11223344;
+			packed[p + 6] = 0x00556677;
+		}
+		sink.appendPacked(packed, 0, 4, 7.0, 8.0, 9.0);
+
+		int failures = 0;
+		if (sink.vertexCount() != 4) {
+			System.out.println("FAIL: appendPacked must not re-split -- 4 vertices in, "
+				+ sink.vertexCount() + " out");
+			failures++;
+		}
+		int[] out = sink.copyOut();
+		int stride = out.length / Math.max(1, sink.vertexCount());
+		for (int i = 0; i < sink.vertexCount(); i++) {
+			// The writer's offset is removed and the sink's own applied: (i + 7 - 7 + 10) * 2 + 1.
+			float x = Float.intBitsToFloat(out[i * stride]);
+			float want = (i + 10.0F) * 2.0F + 1.0F;
+			if (x != want) {
+				System.out.println("FAIL: appendPacked vertex " + i + " x is " + x + ", expected "
+					+ want + " -- the Tessellator offset was counted twice or not at all");
+				failures++;
+			}
+		}
+		if (!TerrainVertex.compact() && sink.vertexCount() == 4) {
+			if (out[5] != 0x11223344 || out[6] != 0x00556677) {
+				System.out.println("FAIL: appendPacked lost the colour or normal word");
+				failures++;
+			}
+		}
+		if (failures == 0) {
+			System.out.println("VertexSink appendPacked OK: raw Tessellator words keep their shape,"
+				+ " and the writer's offset is not applied twice");
+		}
+		return failures;
 	}
 
 	/**

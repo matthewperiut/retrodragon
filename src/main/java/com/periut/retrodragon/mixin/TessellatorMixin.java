@@ -29,7 +29,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * mesher, not by vanilla, and nested start/draw pairs must not split a section's geometry.
  */
 @Mixin(Tessellator.class)
-public class TessellatorMixin {
+public class TessellatorMixin implements com.periut.retrodragon.render.RetroTessellator {
 
 	// The Tessellator's own buffers and batch state. Shadowed rather than reconstructed because the
 	// packed layout IS the thing being captured: 8 ints per vertex -- position 3f at 0, texture 2f at
@@ -55,6 +55,59 @@ public class TessellatorMixin {
 	@Shadow private boolean hasNormals;
 	@Shadow private boolean drawing;
 	@Shadow private int addedVertexCount;
+	@Shadow private double xOffset;
+	@Shadow private double yOffset;
+	@Shadow private double zOffset;
+
+	/**
+	 * Hands a direct writer's vertices to the active capture; see {@link
+	 * com.periut.retrodragon.render.RetroTessellator}.
+	 *
+	 * <p>Appended verbatim, one buffer vertex to one sink vertex. That is only right because the two
+	 * agree on how many vertices a quad occupies, and they are made to agree at startup: a direct
+	 * writer cannot be told about the indexed layout, so {@code RenderBackend} leaves beta's CPU quad
+	 * split ON whenever one is installed, which is the shape {@link VertexSink} is then begun in.
+	 *
+	 * <p>Render thread only, which {@link com.periut.retrodragon.render.MeshScheduler} enforces by
+	 * refusing to go async when a direct writer is installed. There is one Tessellator for the whole
+	 * game and this rewinds its batch, so a worker doing it would gut a batch the render thread is in
+	 * the middle of building.
+	 */
+	@Override
+	public boolean retroperf$drainInto(com.periut.retrodragon.render.VertexSink sink) {
+		if (vertexCount == 0) {
+			return false;
+		}
+		// The writer baked the Tessellator's own offset into the positions and the sink is about to
+		// apply its copy of it, so take it back out on the way through.
+		sink.appendPacked(buffer, 0, vertexCount, xOffset, yOffset, zOffset);
+		// Exactly what vanilla's reset() leaves behind, addedVertexCount included. That field is the
+		// quad split's PHASE, not a statistic: vertex() splits when it is a multiple of four and reads
+		// back from bufferPosition - 24 to do it. Advancing it while rewinding bufferPosition to zero
+		// desynchronises the two, and the next quad's fourth vertex indexes 8 - 24 = -16.
+		vertexCount = 0;
+		bufferPosition = 0;
+		addedVertexCount = 0;
+		byteBuffer.clear();
+		return true;
+	}
+
+	@Override
+	public boolean retroperf$collapseLastQuad() {
+		final int stride = 8;
+		int base = bufferPosition - 6 * stride;
+		if (base < 0) {
+			return false;
+		}
+		// v0,v1,v2,v0,v2,v3 -> v0,v1,v2,v3: the only word that moves is the real fourth corner, from
+		// the last slot back over the first of the two duplicates.
+		System.arraycopy(buffer, base + 5 * stride, buffer, base + 3 * stride, stride);
+		bufferPosition = base + 4 * stride;
+		vertexCount -= 2;
+		// addedVertexCount is left alone on purpose: the writer advanced it by four, which is the
+		// split's phase counted in real corners and stays right whichever shape the batch holds.
+		return true;
+	}
 
 	/**
 	 * Gives the two vertices beta duplicates per quad the normal they were duplicated from.

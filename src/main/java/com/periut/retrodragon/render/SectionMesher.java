@@ -3,7 +3,6 @@ package com.periut.retrodragon.render;
 import net.minecraft.block.Block;
 import net.minecraft.client.render.block.BlockRenderManager;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.chunk.Chunk;
 
 /**
  * The block-iteration half of a chunk build, runnable on any thread.
@@ -21,7 +20,26 @@ public final class SectionMesher {
 	 */
 	private static final ThreadLocal<VertexSink> SINK = ThreadLocal.withInitial(VertexSink::new);
 
+	/**
+	 * Per-thread stand-in for beta's global {@code Chunk.hasSkyLight}, fed by {@code
+	 * ChunkSkyLightMixin}. See that class for why the static could not stay shared.
+	 */
+	private static final ThreadLocal<boolean[]> SKY_LIGHT = ThreadLocal.withInitial(() -> new boolean[1]);
+
 	private SectionMesher() {
+	}
+
+	/** Called from {@code ChunkSkyLightMixin} for every sky-lit block this thread reads. */
+	public static void markSkyLight() {
+		SKY_LIGHT.get()[0] = true;
+	}
+
+	/** Reads this thread's flag and clears it, which is vanilla's clear-walk-read in one call. */
+	private static boolean takeSkyLight() {
+		boolean[] flag = SKY_LIGHT.get();
+		boolean seen = flag[0];
+		flag[0] = false;
+		return seen;
 	}
 
 	public static MeshResult mesh(MeshJob job) {
@@ -36,7 +54,7 @@ public final class SectionMesher {
 		int maxY = job.minY + job.sizeY;
 		int maxZ = job.minZ + job.sizeZ;
 
-		Chunk.hasSkyLight = false;
+		takeSkyLight();
 		BlockRenderManager renderManager = new BlockRenderManager(job.region);
 		// Opacity grid for the occlusion BFS, filled during the layer-0 walk (which visits every
 		// cell regardless of which layer the block belongs to).
@@ -77,6 +95,13 @@ public final class SectionMesher {
 							// Beta mutates the shared Block singleton's bounds while rendering it.
 							synchronized (MeshLock.BLOCK_BOUNDS) {
 								rendered |= renderManager.render(block, bx, by, bz);
+								// A content API may emit its geometry by writing the Tessellator's
+								// int[] directly rather than by calling vertex(), which the capture
+								// cannot see. That writer is pointed at THIS THREAD's Tessellator for
+								// the duration of a capture (see MeshTessellator), so draining it here
+								// touches nothing another thread can be looking at.
+								rendered |= ((RetroTessellator) (Object) MeshTessellator.get())
+									.retroperf$drainInto(sink);
 							}
 						}
 					}
@@ -106,7 +131,7 @@ public final class SectionMesher {
 			}
 		}
 
-		result.hasSkyLight = Chunk.hasSkyLight;
+		result.hasSkyLight = takeSkyLight();
 		result.visibility = SectionVisibility.compute(opaque);
 		return result;
 	}

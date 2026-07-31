@@ -1,9 +1,14 @@
 # StationAPI compile stubs -- NOT SHIPPED, NOT RUN
 
-These are signature-only stand-ins for the handful of StationAPI members the four mixins under
-`com.periut.retrodragon.window.mixin.stapi` reference. They exist so a build does not have to
-download and remap StationAPI (129 MB, and about 86 seconds on a cold cache) to compile four
-compatibility mixins against an API that has not moved in years.
+These are signature-only stand-ins for the handful of StationAPI members the compat mixins under
+`com.periut.retrodragon.window.mixin.stapi` (the reload screen) and `com.periut.retrodragon.mixin.stapi`
+(baked models) reference. They exist so a build does not have to download and remap StationAPI
+(129 MB, and about 86 seconds on a cold cache) to compile a handful of compatibility mixins.
+
+Two of them -- `StationTessellatorImpl` and `BakedModelRendererImpl` -- erase their parameters to
+`Object`, because the mixins that target them select by method NAME (each name is unique in its
+class) and never read the arguments. Reproducing the real descriptors would drag BakedQuad,
+BlockState and BlockPos in for nothing. The FIELDS those mixins `@Shadow` are exact.
 
 They are a SEPARATE SOURCE SET. Their output is on the main compile classpath and nowhere else: not
 in the jar, not on any runtime classpath. `verifyNoStubsInJar` fails the build if a

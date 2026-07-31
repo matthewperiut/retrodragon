@@ -110,9 +110,25 @@ public abstract class ChunkBuilderMixin implements RetroSection {
 	@Override
 	public void retroperf$applyMesh(MeshResult result) {
 		this.retroperf$meshing = false;
-		if (result.generation != this.retroperf$generation) {
-			// The section moved while this was in flight; the geometry is for the old position.
-			this.dirty = true;
+		if (result.failed || result.generation != this.retroperf$generation) {
+			// Either the worker threw, or the section moved while this was in flight and the geometry
+			// is for the old position. Nothing usable arrived, so the section has to be built again.
+			//
+			// Through the world, NOT `this.dirty = true`. Vanilla only ever rebuilds sections that are
+			// in WorldRenderer.dirtyChunks, and the only thing that puts one there --
+			// WorldRenderer.markDirty -- skips a section whose `dirty` is already set. Setting the flag
+			// by hand therefore takes the section OUT of the rebuild path permanently: it looks
+			// scheduled to everything that can schedule it, and is never built again. The chunk then
+			// keeps whatever lighting it last had, through every block and sky light update, forever.
+			// A null world means close() has run: WorldRenderer.reload() -- which is what a video
+			// option like Advanced OpenGL triggers -- calls close() on every section, and close() is
+			// `reset(); this.world = null`. The reset bumps the generation, so an in-flight mesh lands
+			// here with nothing left to schedule against. reload() builds fresh sections and marks
+			// them dirty itself, so the right answer is to drop this result on the floor.
+			if (!this.dirty && this.world != null) {
+				this.world.setBlocksDirty(this.x, this.y, this.z,
+					this.x + this.sizeX - 1, this.y + this.sizeY - 1, this.z + this.sizeZ - 1);
+			}
 			return;
 		}
 

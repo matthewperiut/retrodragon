@@ -80,6 +80,13 @@ public class GlPlugin implements IMixinConfigPlugin {
 
 	@Override
 	public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
+		// The mixins under .mixin.stapi target StationAPI's own classes, which are absent from every
+		// runtime this mod ships on by default. Without this gate Mixin fails to find the target and
+		// the config is `required`, so a plain runClient would die on a mod that is not installed.
+		if (mixinClassName.contains(".mixin.stapi.")) {
+			return net.fabricmc.loader.api.FabricLoader.getInstance()
+				.isModLoaded("station-renderer-api-v0");
+		}
 		return true;
 	}
 

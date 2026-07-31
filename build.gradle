@@ -116,6 +116,23 @@ dependencies {
 
 	ploceus.dependOsl(project.osl_version)
 
+	// OSL's block and item REGISTRY modules, dropped from the dev runtime.
+	//
+	// They add vanilla blocks/items to a registry of their own and lock it in Block.<clinit>, which
+	// is what station-blocks-v0 and station-items-v0 also do -- with both present the game dies
+	// before it draws a frame:
+	//
+	//   IllegalArgumentException: Slot 0 is already occupied by Block{null} when adding Block{null}
+	//     at net.ornithemc.osl.blocks.impl.VanillaBlocks.init
+	//
+	// which is what runClientStapi started doing when the OSL bundle grew these two. Nothing in this
+	// mod uses either (osl-entrypoints is the one OSL dependency it declares), and they are dev-only
+	// -- a real install resolves OSL from fabric.mod.json, not from here.
+	configurations.modImplementation {
+		exclude group: 'net.ornithemc.osl-gen2', module: 'blocks'
+		exclude group: 'net.ornithemc.osl-gen2', module: 'items'
+	}
+
 	// Bundled with fabric-loader at runtime; compile-time only here.
 	compileOnly 'io.github.llamalad7:mixinextras-fabric:0.4.1'
 
@@ -519,6 +536,11 @@ def forwarded = { key ->
 		// RetroCenter's own keys (packetId, child, childShimJar) -- same reasoning as the four
 		// above: -Dretrocenter.packetId=231 on the Gradle command line has to reach the game.
 		|| name.startsWith('retrocenter.')
+		// Mixin's own switches, so -Dmixin.debug.export=true on the Gradle command line answers
+		// "did that injector actually apply" without editing a run configuration. The mixins that
+		// target a content API only load when that API does, so "no error in the log" is not the
+		// same as "applied", and the exported class is the only proof that is.
+		|| name.startsWith('mixin.')
 }
 
 // Standalone WebGPU checks. They run the renderer without the game, which is the only way to

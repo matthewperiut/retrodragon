@@ -127,6 +127,7 @@ public final class MeshScheduler {
 				MeshResult empty = new MeshResult(job.section, job.generation);
 				empty.layers[0] = ChunkGeometry.NO_VERTICES;
 				empty.layers[1] = ChunkGeometry.NO_VERTICES;
+				empty.failed = true;
 				DONE.add(empty);
 			}
 		}

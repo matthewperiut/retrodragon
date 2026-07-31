@@ -16,6 +16,8 @@ public final class MeshResult {
 	public int[] blockEntityPositions = new int[0];
 	public int blockEntityCount;
 	public boolean hasSkyLight;
+	/** Set when the worker threw: the geometry is not this section's, so it must be rebuilt. */
+	public boolean failed;
 	/** Face-to-face connectivity for the occlusion BFS. */
 	public long visibility = SectionVisibility.ALL_CONNECTED;
 

@@ -11,6 +11,7 @@
     "BlockRendererMixin",
     "GameOptionsMixin",
     "ChunkBuilderMixin",
+    "ChunkSkyLightMixin",
     "TessellatorMixin",
     "WorldRendererMixin",
     "Vec3dCacheMixin",
@@ -31,7 +32,9 @@
     "EntityRendererPhaseMixin",
     "ParticleManagerPhaseMixin",
     "HudPhaseMixin",
-    "ScreenPhaseMixin"
+    "ScreenPhaseMixin",
+    "stapi.BakedModelRendererMixin",
+    "stapi.StationTessellatorMixin"
   ],
   "server": [],
   "injectors": {
