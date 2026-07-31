@@ -10,10 +10,17 @@
 #        * babric variant  <- build/libs/<base>-<version>-babric.jar, if the retroconvert
 #                             plugin produced one
 #   3. Attaches the jar(s) to the GitHub Release (always - no configuration needed).
-#   4. TRIES to publish to Modrinth: only if BOTH the `MODRINTH_TOKEN` secret and the
+#   4. Publishes the maven artifacts into the matthewperiut.github.io pages repo (maven repo,
+#      manifest.json, repository-tree.json) and repins `retrodragon_version` in the RetroAPI
+#      docs and template zips there. Needs the `PAGES_TOKEN` secret; runs BEFORE Modrinth so a
+#      duplicate-version rejection on a re-run cannot block it. Idempotent: a version already
+#      in the pages maven repo produces no commit.
+#   5. TRIES to publish to Modrinth: only if BOTH the `MODRINTH_TOKEN` secret and the
 #      `MODRINTH_ID` repository variable are set. If either is missing the Modrinth steps
 #      are skipped with a notice - GitHub publishing still happens.
 #
+# Required configuration:
+#   * secret   PAGES_TOKEN    - a PAT with write access to matthewperiut/matthewperiut.github.io
 # Optional configuration:
 #   * secret   MODRINTH_TOKEN - a Modrinth PAT with write scope
 #   * variable MODRINTH_ID    - the mod's Modrinth project id or slug
@@ -45,15 +52,17 @@ jobs:
           # A release build must not write the shared cache; it reads what check.yml warmed.
           cache-read-only: true
 
-      - name: Build
+      - name: Build (and publish to Maven Local)
         run: |
           chmod +x ./gradlew
-          ./gradlew build --stacktrace
+          ./gradlew build publishToMavenLocal --stacktrace
 
       - name: Resolve mod coordinates
         id: mod
         run: |
-          version=$(./gradlew properties -q --console=plain | awk -F': ' '$1 == "version" { print $2; exit }')
+          props=$(./gradlew properties -q --console=plain)
+          version=$(echo "$props" | awk -F': ' '$1 == "version" { print $2; exit }')
+          group=$(echo "$props" | awk -F': ' '$1 == "group" { print $2; exit }')
           base=$(sed -nE 's/^[[:space:]]*archives_base_name[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
           mc=$(sed -nE 's/^[[:space:]]*minecraft_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
           main_jar="build/libs/${base}-${version}.jar"
@@ -71,6 +80,7 @@ jobs:
           esac
           {
             echo "version=$version"
+            echo "group=$group"
             echo "base=$base"
             echo "minecraft_version=$mc"
             echo "main_jar=$main_jar"
@@ -90,6 +100,43 @@ jobs:
         with:
           files: ${{ steps.mod.outputs.release_files }}
           fail_on_unmatched_files: true
+
+      # --- Maven repository / manifest on matthewperiut.github.io ---
+      # Runs BEFORE Modrinth so a Modrinth duplicate-version rejection on a re-run can't
+      # block the pages auto-update. All pages steps are idempotent.
+      - name: Checkout pages repo
+        uses: actions/checkout@v4
+        with:
+          repository: matthewperiut/matthewperiut.github.io
+          token: ${{ secrets.PAGES_TOKEN }}
+          path: pages
+
+      # --docs-property repins `retrodragon_version = <ver>` in the RetroAPI docs and inside both
+      # template zips, the same way retroconvert/starac do for their own keys.
+      - name: Update pages (maven repo, manifest, docs pin)
+        run: |
+          python3 .github/scripts/update_pages.py \
+            --pages pages \
+            --group "${{ steps.mod.outputs.group }}" \
+            --artifact-hint "${{ steps.mod.outputs.base }}" \
+            --version "${{ steps.mod.outputs.version }}" \
+            --commit "${{ github.sha }}" \
+            --branch "${{ github.event.release.target_commitish || github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --docs-property retrodragon_version
+
+      - name: Commit & push pages
+        working-directory: pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no pages changes to commit"
+          else
+            git commit -m "actions: update retrodragon"
+            git push
+          fi
 
       # --- Modrinth: only when both MODRINTH_TOKEN (secret) and MODRINTH_ID (variable) exist ---
       - name: Detect Modrinth configuration
