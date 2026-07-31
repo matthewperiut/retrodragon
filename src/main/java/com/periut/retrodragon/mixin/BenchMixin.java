@@ -262,7 +262,55 @@ public class BenchMixin {
 		this.client.world.setBlock(this.rp$x, py, pz, 2);          // grass block
 		this.client.world.setBlock(this.rp$x, py + 1, pz, 31, 1);     // tall grass
 		this.client.world.setBlock(this.rp$x, py + 1, pz + 2, 31, 2); // fern
+		rp$stageLights(py, pz);
 		System.out.println("RETROPERF-BENCH: staged props at " + this.rp$x + "," + py + "," + pz);
+	}
+
+	/**
+	 * {@code -Dretroperf.bench.lights=true} adds emitters and a wall to the prop platform.
+	 *
+	 * <p>For inspecting BLOCK LIGHT, which the prop platform otherwise cannot show: it is staged in
+	 * open ocean under an open sky, so every surface on it is lit by the sun and nothing reveals what
+	 * a torch does. Three things are needed to see that, and all three are here:
+	 *
+	 * <ul>
+	 * <li>emitters of DIFFERENT colours, so a renderer that tints them all identically is obvious --
+	 *     a torch, a lit redstone torch and a glowstone block;</li>
+	 * <li>a WALL between one of them and the rest of the platform, so light that fails to be
+	 *     occluded shows up as a lit face that should have been dark;</li>
+	 * <li>the whole thing on flat ground, so the falloff is readable as a gradient rather than as
+	 *     terrain shape.</li>
+	 * </ul>
+	 *
+	 * <p>Pair it with {@code -Dretroperf.bench.time=18000} -- at noon the sun drowns everything this
+	 * is meant to show.
+	 */
+	@Unique
+	private void rp$stageLights(int py, int pz) {
+		if (!Boolean.getBoolean("retroperf.bench.lights")) {
+			return;
+		}
+		// A stone wall across the FAR half of the platform, BEYOND the emitters.
+		//
+		// Beyond, not between: the camera looks along +z, so a wall in front of the torch would show
+		// only its own dark face and prove nothing about the light. Behind them, its near face is lit
+		// and everything past it must stay black -- which is the occlusion actually being tested.
+		for (int dx = -4; dx <= 4; dx++) {
+			for (int dy = 1; dy <= 3; dy++) {
+				this.client.world.setBlock(this.rp$x + dx, py + dy, pz + 2, 1); // stone
+			}
+		}
+		// Three emitters, spread out so their pools do not merge into one wash, and chosen because
+		// a renderer that tints all block light alike makes them identical: torch warm orange,
+		// glowstone warm white, lit redstone torch red.
+		// Metadata 5 on both torches: it is beta's FLOOR-mounted orientation. Placed with the
+		// default 0 -- which is not a valid orientation at all -- each torch pops on the first block
+		// update, drops as an item and takes the block under it with it, leaving a hole in the
+		// platform that reads exactly like a black square of broken lighting.
+		this.client.world.setBlock(this.rp$x - 3, py + 1, pz, 50, 5);   // torch
+		this.client.world.setBlock(this.rp$x + 3, py + 1, pz, 89);      // glowstone
+		this.client.world.setBlock(this.rp$x, py + 1, pz - 1, 76, 5);   // lit redstone torch
+        System.out.println("RETROPERF-BENCH: staged lights (torch, glowstone, redstone torch, wall)");
 	}
 
 	@Unique

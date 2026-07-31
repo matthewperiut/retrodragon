@@ -60,6 +60,15 @@ public final class DrawList {
 	private int[] external = new int[INITIAL_BATCHES];
 	private final java.util.ArrayList<Object> buffers = new java.util.ArrayList<>();
 
+	/**
+	 * What the game was drawing when each batch was captured; see {@code api/DrawPhase}.
+	 *
+	 * <p>Recorded per batch rather than derived at replay because by replay the game has moved on --
+	 * the phase is only knowable at the moment of capture. It is what lets the replay find "the end
+	 * of the opaque world" without guessing from state, and what a shader extension routes on.
+	 */
+	private int[] phase = new int[INITIAL_BATCHES];
+
 	// --- pass segments ---------------------------------------------------------------------------
 	//
 	// Beta clears mid-frame -- the depth buffer between the world and the GUI, most notably -- and
@@ -161,6 +170,11 @@ public final class DrawList {
 	 */
 	public void add(ByteBuffer source, int vertices, int glMode, long pipelineKey, int texture,
 			ByteBuffer uniformBlock) {
+		add(source, vertices, glMode, pipelineKey, texture, uniformBlock, 0);
+	}
+
+	public void add(ByteBuffer source, int vertices, int glMode, long pipelineKey, int texture,
+			ByteBuffer uniformBlock, int phase) {
 		if (vertices <= 0) {
 			return;
 		}
@@ -172,7 +186,7 @@ public final class DrawList {
 		// draws into one, and it is exact rather than approximate: the batches share a pipeline, a
 		// texture, a primitive mode and a byte-identical uniform block, so one draw over the
 		// concatenated vertices is the same GPU work.
-		if (canMerge(glMode, pipelineKey, texture, uniformBlock)) {
+		if (canMerge(glMode, pipelineKey, texture, uniformBlock, phase)) {
 			copy(source, vertices * STRIDE, this.vertices, vertexCount * STRIDE);
 			count[batchCount - 1] += vertices;
 			vertexCount += vertices;
@@ -194,6 +208,7 @@ public final class DrawList {
 		this.texture[batchCount] = texture;
 		this.glMode[batchCount] = glMode;
 		this.external[batchCount] = -1;
+		this.phase[batchCount] = phase;
 
 		vertexCount += vertices;
 		batchCount++;
@@ -209,13 +224,18 @@ public final class DrawList {
 	 */
 	public void addExternal(Object buffer, int firstVertex, int vertices, int glMode,
 			long pipelineKey, int texture, ByteBuffer uniformBlock) {
+		addExternal(buffer, firstVertex, vertices, glMode, pipelineKey, texture, uniformBlock, 0);
+	}
+
+	public void addExternal(Object buffer, int firstVertex, int vertices, int glMode,
+			long pipelineKey, int texture, ByteBuffer uniformBlock, int phase) {
 		if (vertices <= 0 || buffer == null) {
 			return;
 		}
 		// Two allocations that are adjacent in the same buffer, under identical state, are one
 		// draw. This is what the terrain arena exists for: at the default view distance it turns
 		// hundreds of per-section draws into a handful of runs.
-		if (canMergeExternal(buffer, firstVertex, glMode, pipelineKey, texture, uniformBlock)) {
+		if (canMergeExternal(buffer, firstVertex, glMode, pipelineKey, texture, uniformBlock, phase)) {
 			count[batchCount - 1] += vertices;
 			merged++;
 			return;
@@ -235,6 +255,7 @@ public final class DrawList {
 		this.texture[batchCount] = texture;
 		this.glMode[batchCount] = glMode;
 		this.external[batchCount] = handle;
+		this.phase[batchCount] = phase;
 		batchCount++;
 	}
 
@@ -252,11 +273,19 @@ public final class DrawList {
 	 * -- quad N of a merged batch indexes exactly the vertices it did before. Strips and fans do NOT
 	 * merge: concatenating two strips would create phantom triangles across the join.
 	 */
-	private boolean canMerge(int glMode, long pipelineKey, int texture, ByteBuffer uniformBlock) {
+	private boolean canMerge(int glMode, long pipelineKey, int texture, ByteBuffer uniformBlock,
+			int phase) {
 		if (batchCount == 0 || segmentFirstBatch[segmentCount - 1] == batchCount) {
 			return false;
 		}
 		int previous = batchCount - 1;
+		// A merged batch has ONE phase, and the replay uses phase boundaries to decide where a
+		// shader extension's hooks fire and which batches a shadow map contains. Folding the first
+		// entity draw into the last terrain one would move the deferred hook past geometry that
+		// belongs before it.
+		if (this.phase[previous] != phase) {
+			return false;
+		}
 		if (this.external[previous] >= 0) {
 			// The previous batch draws from its own buffer; this one's vertices are in the shared
 			// buffer, so they cannot be one draw.
@@ -286,11 +315,14 @@ public final class DrawList {
 	 * section that was deliberately culled or unallocated space.
 	 */
 	private boolean canMergeExternal(Object buffer, int firstVertex, int glMode, long pipelineKey,
-			int texture, ByteBuffer uniformBlock) {
+			int texture, ByteBuffer uniformBlock, int phase) {
 		if (batchCount == 0 || segmentFirstBatch[segmentCount - 1] == batchCount) {
 			return false;
 		}
 		int previous = batchCount - 1;
+		if (this.phase[previous] != phase) {
+			return false;
+		}
 		if (external[previous] < 0 || buffers.get(external[previous]) != buffer) {
 			return false;
 		}
@@ -389,6 +421,7 @@ public final class DrawList {
 		texture = java.util.Arrays.copyOf(texture, capacity);
 		glMode = java.util.Arrays.copyOf(glMode, capacity);
 		external = java.util.Arrays.copyOf(external, capacity);
+		phase = java.util.Arrays.copyOf(phase, capacity);
 
 		ByteBuffer grown = direct(capacity * UNIFORM_SLOT);
 		uniforms.position(0).limit(batchCount * UNIFORM_SLOT);
@@ -423,6 +456,53 @@ public final class DrawList {
 
 	public int glMode(int batch) {
 		return glMode[batch];
+	}
+
+	/** What the game was drawing when this batch was captured; see {@code api/DrawPhase}. */
+	public int phase(int batch) {
+		return phase[batch];
+	}
+
+	/**
+	 * The first batch at or after {@code from} whose phase is not part of the world.
+	 *
+	 * <p>Where the world ends and the GUI begins, which is where a shader extension's composite
+	 * chain has to run: everything before it goes through the extension's target, everything after
+	 * it is drawn on the result.
+	 */
+	public int firstNonWorldBatch(int from) {
+		for (int batch = from; batch < batchCount; batch++) {
+			if (!com.periut.retrodragon.api.DrawPhase.isWorld(phase[batch])) {
+				return batch;
+			}
+		}
+		return batchCount;
+	}
+
+	/**
+	 * The first batch at or after {@code from} that is drawn AFTER the opaque world.
+	 *
+	 * <p>Where a deferred pass belongs: the opaque scene is complete and its depth is final, but
+	 * nothing translucent has been blended over it yet. Beta's order puts sky and clouds first, then
+	 * opaque terrain and entities, then translucent terrain and everything else, so the boundary is
+	 * the first translucent-or-later phase.
+	 */
+	public int firstTranslucentBatch(int from) {
+		for (int batch = from; batch < batchCount; batch++) {
+			switch (phase[batch]) {
+				case com.periut.retrodragon.api.DrawPhase.TERRAIN_TRANSLUCENT,
+					com.periut.retrodragon.api.DrawPhase.PARTICLES,
+					com.periut.retrodragon.api.DrawPhase.WEATHER,
+					com.periut.retrodragon.api.DrawPhase.HAND,
+					com.periut.retrodragon.api.DrawPhase.GUI -> {
+					return batch;
+				}
+				default -> {
+					// still opaque
+				}
+			}
+		}
+		return batchCount;
 	}
 
 	/** Byte offset of this batch's uniform block, ready to pass as a dynamic offset. */

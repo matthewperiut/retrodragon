@@ -7,6 +7,7 @@ import com.periut.retrodragon.shim.GlShim;
 import com.periut.retrodragon.shim.ShimTracker;
 import com.periut.retrodragon.window.sdl.Sdl3Window;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 
 /**
@@ -38,14 +39,26 @@ public final class WebGpuFrame {
 		return renderer != null && renderer.readPixels(x, y, width, height, format, pixels);
 	}
 
+	private static FixedFunctionPipelines.Shared sharedPipelines;
 	private static FixedFunctionPipelines pipelines;
+	/** Pipelines for the shader extension's own colour target; null when nobody asked for one. */
+	private static FixedFunctionPipelines worldPipelines;
+	/** Depth-only pipelines for the shadow pass; null until an extension requests one. */
+	private static FixedFunctionPipelines shadowPipelines;
 	private static ImmediateRenderer immediate;
 	private static TextureStore textures;
+	private static ShaderTargets shaderTargets;
+	private static ShadowMap shadowMap;
+	private static com.periut.retrodragon.api.ShaderResources shaderResources;
 	private static volatile boolean initialized;
 	private static volatile boolean failed;
 
 	private static long frames;
 	private static int lastDraws;
+
+	/** Terrain handed to the frame this frame -- the number that says whether it was ever captured. */
+	private static int terrainBatches;
+	private static int terrainVertices;
 
 	/**
 	 * {@code -Dretroperf.shotFrame=N} writes frame N to a PNG and keeps going.
@@ -76,13 +89,15 @@ public final class WebGpuFrame {
 		try {
 			WebGPUContext ctx = GpuBackend.context();
 			renderer = WebGpuRenderer.create(ctx, Sdl3Window.width(), Sdl3Window.height());
-			pipelines = FixedFunctionPipelines.create(ctx, renderer.surfaceFormat(),
+			sharedPipelines = FixedFunctionPipelines.Shared.create(ctx);
+			pipelines = FixedFunctionPipelines.create(ctx, sharedPipelines, renderer.surfaceFormat(),
 				renderer.depthFormat());
 			immediate = new ImmediateRenderer(ctx);
 			textures = new TextureStore(ctx);
 			initialized = true;
 			RetroDragon.LOGGER.info("WebGPU renderer up: {}x{}, surface format {}",
 				renderer.width(), renderer.height(), renderer.surfaceFormat());
+			startExtensions(ctx);
 		} catch (Throwable t) {
 			// A failure here is not recoverable -- the window has no GL context to fall back to -- but
 			// crashing inside a GL entry point produces a stack trace that blames the game. Say what
@@ -92,6 +107,159 @@ public final class WebGpuFrame {
 				+ " fall back to. Relaunch with -Dretroperf.backend=gl.", t);
 		}
 		return initialized;
+	}
+
+	/**
+	 * How large the shader-extension uniform block is, in bytes.
+	 *
+	 * <p>Generous on purpose. A pack's per-frame block is a dozen matrices and a few dozen scalars --
+	 * a kilobyte in the shape everyone who has written one settles on -- and it is allocated ONCE,
+	 * not per draw, so oversizing it costs a kilobyte of VRAM rather than anything per frame.
+	 * Sizing it to the pack instead would mean the block's layout was part of the engine's ABI.
+	 */
+	private static final int SHADER_UNIFORM_BYTES =
+		Integer.getInteger("retroperf.shaderUniformBytes", 4096);
+
+	/**
+	 * Brings up the shader extensions, and with them anything they ask the engine to allocate.
+	 *
+	 * <p>Here rather than at mod init because everything an extension registers needs a device, and
+	 * the device does not exist until the window does. A failure disables the extensions and leaves
+	 * the plain renderer running -- a shader mod that cannot start must not take the game with it.
+	 */
+	private static boolean extensionsStarted;
+
+	private static void startExtensions(WebGPUContext ctx) {
+		if (extensionsStarted || !com.periut.retrodragon.api.ShaderApi.hasExtensions()) {
+			return;
+		}
+		extensionsStarted = true;
+		try {
+			shaderResources = new com.periut.retrodragon.api.ShaderResources(ctx, SHADER_UNIFORM_BYTES);
+			com.periut.retrodragon.api.ShaderApi.startAll(shaderResources,
+				renderer.surfaceFormat());
+			if (com.periut.retrodragon.api.ShaderApi.worldTargetOwner() != null) {
+				shaderTargets = new ShaderTargets(ctx,
+					com.periut.retrodragon.api.ShaderApi.worldTargetFormat(),
+					com.periut.retrodragon.api.ShaderApi.worldTargetAux());
+				shaderTargets.resize(renderer.width(), renderer.height());
+				shaderResources.setWorldTarget(shaderTargets.view());
+				worldPipelines = FixedFunctionPipelines.create(ctx, sharedPipelines, "world",
+					shaderTargets.format(), shaderTargets.auxFormats(), renderer.depthFormat(),
+					false, TerrainVertex.compact());
+				RetroDragon.LOGGER.info("world redirected to a shader target owned by '{}'"
+						+ " ({} aux attachment(s))",
+					com.periut.retrodragon.api.ShaderApi.worldTargetOwner().id(),
+					shaderTargets.auxCount());
+			}
+		} catch (Throwable t) {
+			RetroDragon.LOGGER.error("shader extensions failed to start; rendering without them", t);
+			releaseExtensionResources();
+		}
+	}
+
+	/**
+	 * Whether an extension installed itself AFTER the renderer came up, and needs starting.
+	 *
+	 * <p>Which is the normal case, not an edge one. The renderer is brought up lazily by the first
+	 * intercepted GL call, and beta's first GL call is a texture upload during startup -- which
+	 * happens before mod initialisers have finished running. So a shader mod that installs itself
+	 * from its own initialiser, which is the only place it can, reliably arrives second.
+	 *
+	 * <p>Checked once a frame rather than pushed from install(), because install() is called from a
+	 * mod's initialiser thread and everything it would have to do -- create a bind group, allocate
+	 * a colour target, compile nothing yet -- belongs on the render thread.
+	 */
+	private static boolean extensionsPending() {
+		return !extensionsStarted && com.periut.retrodragon.api.ShaderApi.hasExtensions();
+	}
+
+	/**
+	 * Tells the extensions the world frame is starting, while beta's own state is still live.
+	 *
+	 * <p>Called from the phase mixin at {@code renderWorld} HEAD -- the camera transform is loaded,
+	 * the fog is set, and the tick delta is in hand. An extension computes its per-frame uniform
+	 * block here; there is nowhere later it could, because the frame is not submitted until the
+	 * buffer swap, by which point none of this state exists.
+	 */
+	/**
+	 * Whether this world frame's state has been handed to the extensions yet.
+	 *
+	 * <p>Reset at the top of world rendering and set by the first call that arrives with beta's
+	 * camera actually loaded; see {@link #beginWorldFrame}.
+	 */
+	private static boolean worldFrameNotified;
+
+	/**
+	 * Called at the top of world rendering, BEFORE beta has set up its camera.
+	 *
+	 * <p>Only arms the notification. The state an extension needs -- the camera modelview, the
+	 * projection, the fog -- does not exist yet at this point: beta loads the projection and applies
+	 * the view bobbing and camera rotation further down the same method. Reading them here gets the
+	 * GUI's orthographic matrix and an identity modelview, which is not obviously wrong in a log and
+	 * is thoroughly wrong on screen -- a skybox built from that projection paints one flat colour,
+	 * and every shadow lookup lands somewhere else entirely.
+	 */
+	public static void beginWorldFrame() {
+		worldFrameNotified = false;
+	}
+
+	/**
+	 * Re-arms the notification at the frame boundary.
+	 *
+	 * <p>Belt and braces alongside {@link #beginWorldFrame}, and not redundant: that one runs from a
+	 * mixin on the game's world-render entry point, and if it does not fire -- a mapping change, an
+	 * injection that silently does not apply, another mod cancelling the method -- the flag latches
+	 * true after the first frame and every extension's per-frame state freezes at frame one. Nothing
+	 * about that looks like a missing callback: the sky keeps rendering, the shadows keep drawing,
+	 * they are just all computed from the first frame's camera, which reads as "shadows follow the
+	 * view" and "lights never update".
+	 *
+	 * <p>This runs from the present path, which by definition happens once a frame or the game is not
+	 * running at all.
+	 */
+	private static void rearmWorldFrame() {
+		worldFrameNotified = false;
+	}
+
+	public static void notifyWorldFrame(float tickDelta) {
+		if (worldFrameNotified || !active()) {
+			return;
+		}
+		worldFrameNotified = true;
+		for (com.periut.retrodragon.api.ShaderExtension extension
+				: com.periut.retrodragon.api.ShaderApi.extensions()) {
+			try {
+				extension.onWorldFrame(tickDelta);
+			} catch (Throwable t) {
+				RetroDragon.LOGGER.error("shader extension '{}' threw preparing a world frame;"
+					+ " removing it", extension.id(), t);
+				com.periut.retrodragon.api.ShaderApi.remove(extension);
+			}
+		}
+	}
+
+	private static void releaseExtensionResources() {
+		if (worldPipelines != null) {
+			worldPipelines.close();
+			worldPipelines = null;
+		}
+		if (shadowPipelines != null) {
+			shadowPipelines.close();
+			shadowPipelines = null;
+		}
+		if (shaderTargets != null) {
+			shaderTargets.close();
+			shaderTargets = null;
+		}
+		if (shadowMap != null) {
+			shadowMap.close();
+			shadowMap = null;
+		}
+		if (shaderResources != null) {
+			shaderResources.close();
+			shaderResources = null;
+		}
 	}
 
 	/**
@@ -174,13 +342,85 @@ public final class WebGpuFrame {
 		if (frames + 1 == DUMP_FRAME) {
 			dump(source, vertexCount, glMode, hasColor, hasNormals);
 		}
-		if (captureWideLine(gl, source, vertexCount, glMode, hasColor, hasNormals, hasTexture)) {
+		int phase = com.periut.retrodragon.api.ShaderApi.phase();
+		int texture = gl.boundTexture();
+		// Dropped BEFORE the vertices are copied, not filtered at draw time: a suppressed blob shadow
+		// should cost nothing, and the copy is the expensive half of a capture.
+		if (!com.periut.retrodragon.api.ShaderApi.isVisible(routeTexture(gl, texture))) {
+			return;
+		}
+		if (captureWideLine(gl, source, vertexCount, glMode, hasColor, hasNormals, hasTexture,
+				phase)) {
 			return;
 		}
 		gl.setTopology(Primitives.topology(glMode));
-		LIST.add(source, vertexCount, glMode, gl.pipelineKey(), gl.boundTexture(),
-			gl.state().writeUniforms(hasColor, hasNormals, hasTexture));
+		LIST.add(source, vertexCount, glMode,
+			routedKey(gl, texture, com.periut.retrodragon.api.ProgramSpec.VertexLayout.FIXED_FUNCTION),
+			texture, gl.state().writeUniforms(hasColor, hasNormals, hasTexture), phase);
 	}
+
+	/**
+	 * The batch's pipeline key with a shader extension's chosen program substituted, if any claimed
+	 * it.
+	 *
+	 * <p>Asked once per captured batch rather than once per draw call, and skipped entirely when no
+	 * extension is installed -- {@code hasExtensions} is a single static read, which is what keeps
+	 * this off the cost of a plain frame.
+	 */
+	/**
+	 * The texture an extension is told about: the bound name, or -1 when texturing is OFF.
+	 *
+	 * <p>Beta leaves a texture bound while drawing untextured geometry, so the bound name alone
+	 * cannot distinguish the sky plate from the block atlas -- and an extension that suppresses
+	 * beta's sky in favour of its own would fail to, silently, with beta's plate painted over the
+	 * top of it.
+	 */
+	private static int routeTexture(GlShim gl, int texture) {
+		return gl.state().textured() ? texture : -1;
+	}
+
+	private static long routedKey(GlShim gl, int texture,
+			com.periut.retrodragon.api.ProgramSpec.VertexLayout layout) {
+		return routedKey(gl, texture, layout, gl.pipelineKey());
+	}
+
+	/** As above, over a key the caller already built -- the outline's carries a depth bias. */
+	private static long routedKey(GlShim gl, int texture,
+			com.periut.retrodragon.api.ProgramSpec.VertexLayout layout, long baseKey) {
+		if (!com.periut.retrodragon.api.ShaderApi.hasExtensions()) {
+			return baseKey;
+		}
+		int program = com.periut.retrodragon.api.ShaderApi.routeProgram(routeTexture(gl, texture),
+			gl.state().lit());
+		long key = baseKey;
+		if (program == com.periut.retrodragon.api.ShaderExtension.NO_PROGRAM) {
+			return key;
+		}
+		// A program may only be substituted when it reads the SAME vertex stream the batch was
+		// captured in. A pipeline bakes its stride in, so pointing a program built for beta's
+		// 32-byte Tessellator vertex at the engine's packed terrain buffer does not fail -- it reads
+		// every vertex from the wrong offset and the section erupts across the screen in enormous
+		// stretched triangles. That costs the frame, and enough of them costs the compositor.
+		//
+		// Checked here rather than trusted to the extension because the extension does not
+		// necessarily know: routing is by draw PHASE, and a phase can be wrong for reasons that have
+		// nothing to do with the pack -- two mixins at one injection point with no defined order was
+		// how this one happened.
+		com.periut.retrodragon.api.ProgramSpec spec =
+			com.periut.retrodragon.api.ShaderApi.program(program);
+		if (spec != null && spec.layout() != layout) {
+			if (mismatchWarnings.add(program)) {
+				RetroDragon.LOGGER.warn("program '{}' reads the {} vertex stream but was routed to a"
+					+ " {} draw; keeping the engine's program for it", spec.name(), spec.layout(),
+					layout);
+			}
+			return key;
+		}
+		return com.periut.retrodragon.shim.PipelineKey.withProgram(key, program);
+	}
+
+	/** One warning per offending program, not one per draw. */
+	private static final java.util.Set<Integer> mismatchWarnings = new java.util.HashSet<>();
 
 	/** Reused across frames; the outline is the only caller and it is a handful of vertices. */
 	private static final LineExpander LINE_EXPANDER = new LineExpander();
@@ -196,7 +436,7 @@ public final class WebGpuFrame {
 	 * @return true if the batch was handled here and the caller should stop
 	 */
 	private static boolean captureWideLine(GlShim gl, ByteBuffer source, int vertexCount,
-			int glMode, boolean hasColor, boolean hasNormals, boolean hasTexture) {
+			int glMode, boolean hasColor, boolean hasNormals, boolean hasTexture, int phase) {
 
 		boolean isLine = glMode == Primitives.GL_LINES || glMode == Primitives.GL_LINE_STRIP
 			|| glMode == Primitives.GL_LINE_LOOP;
@@ -213,13 +453,29 @@ public final class WebGpuFrame {
 		// Quads now rather than lines, and the vertices are in eye space -- so the modelview goes
 		// identity while the projection stays, leaving the GPU to do the divide.
 		gl.setTopology(Primitives.topology(Primitives.GL_QUADS));
+		int outlineTexture = gl.boundTexture();
+		// ROUTED and PHASE-STAMPED, exactly as an ordinary capture is.
+		//
+		// Both were missing, and the phase was the expensive one: this path used the add() overload
+		// that defaults the phase to NONE, which isWorld() reports as false. So the frame's
+		// world/GUI split landed ON the block outline, and everything beta drew after it -- the
+		// CLOUDS above all -- was replayed in the GUI range: straight to the swapchain, with the
+		// engine's own program, no routing and no tonemap. The symptom was the clouds changing
+		// colour whenever the crosshair found a block, which points nowhere near the line expander.
+		//
+		// Routing has to come with it. Once the outline is stamped as world geometry it is drawn
+		// into the extension's LINEAR target, and the engine's program writes display-space colour
+		// there, which the composite then re-gammas into a washed-out outline.
+		long outlineKey = routedKey(gl, outlineTexture,
+			com.periut.retrodragon.api.ProgramSpec.VertexLayout.FIXED_FUNCTION,
+			gl.pipelineKeyWithDepthBias(OUTLINE_DEPTH_BIAS, OUTLINE_DEPTH_SLOPE));
 		LIST.add(LINE_EXPANDER.data(), LINE_EXPANDER.vertexCount(), Primitives.GL_QUADS,
-			gl.pipelineKeyWithDepthBias(OUTLINE_DEPTH_BIAS, OUTLINE_DEPTH_SLOPE),
-			gl.boundTexture(),
+			outlineKey,
+			outlineTexture,
 			// hasColor passed through, NOT assumed: beta draws the outline with glColor4f and no
 			// per-vertex colour at all, so claiming otherwise makes the shader read an empty slot
 			// and the outline comes out the wrong colour entirely.
-			gl.state().writeUniformsEye(hasColor, hasNormals, hasTexture));
+			gl.state().writeUniformsEye(hasColor, hasNormals, hasTexture), phase);
 		return true;
 	}
 
@@ -247,7 +503,7 @@ public final class WebGpuFrame {
 		GlShim gl = ShimTracker.shim();
 		gl.setTopology(Primitives.topology(Primitives.GL_QUADS));
 		LIST.add(source, vertexCount, Primitives.GL_QUADS, gl.pipelineKey(), texture,
-			gl.state().writeUniforms(true, false));
+			gl.state().writeUniforms(true, false), com.periut.retrodragon.api.ShaderApi.phase());
 	}
 
 	/**
@@ -272,8 +528,13 @@ public final class WebGpuFrame {
 		gl.setTopology(Primitives.topology(glMode));
 		gl.state().setTerrainParams(TerrainAppearance.atlasTexels(), TerrainAppearance.tileTexels(),
 			TerrainAppearance.maxLod(), TerrainAppearance.rgss());
+		int texture = gl.boundTexture();
+		terrainBatches++;
+		terrainVertices += vertexCount;
 		LIST.addExternal(buffer, firstVertex, vertexCount, glMode,
-			gl.pipelineKey(), gl.boundTexture(), gl.state().writeUniforms(true, false));
+			routedKey(gl, texture, com.periut.retrodragon.api.ProgramSpec.VertexLayout.TERRAIN),
+			texture, gl.state().writeUniforms(true, false),
+			com.periut.retrodragon.api.ShaderApi.phase());
 		// Back to the default program: the very next thing beta draws is an entity or the GUI.
 		gl.setProgram(com.periut.retrodragon.shim.PipelineKey.PROGRAM_FIXED_FUNCTION);
 	}
@@ -309,6 +570,9 @@ public final class WebGpuFrame {
 		if (!initialized) {
 			return;
 		}
+		if (extensionsPending()) {
+			startExtensions(GpuBackend.context());
+		}
 		renderer.syncPresentMode();
 		if (!renderer.beginFrame()) {
 			// No backbuffer this frame (minimised, or mid-resize). The recorded draws are dropped
@@ -316,8 +580,7 @@ public final class WebGpuFrame {
 			LIST.reset();
 			return;
 		}
-		lastDraws = immediate.render(renderer.frame(), renderer.colorView(), renderer.depthView(),
-			LIST, pipelines, textures);
+		lastDraws = replay();
 		int vertices = LIST.vertexCount();
 		int segments = LIST.segmentCount();
 		// Read before reset(), which zeroes them.
@@ -326,8 +589,13 @@ public final class WebGpuFrame {
 		if (frames + 1 == SHOT_FRAME) {
 			renderer.screenshot(java.nio.file.Path.of("webgpu-frame-" + SHOT_FRAME + ".png"));
 		}
+		int terrainThisFrame = terrainBatches;
+		int terrainVertsThisFrame = terrainVertices;
+		terrainBatches = 0;
+		terrainVertices = 0;
 		renderer.endFrame();
 		LIST.reset();
+		rearmWorldFrame();
 		frames++;
 
 		// Clean exit lives in FrameTimer, which ticks on both backends -- a comparison run has to end
@@ -350,6 +618,248 @@ public final class WebGpuFrame {
 			// GPU work it already collapsed.
 			RetroDragon.LOGGER.info("frame {}: {} captures -> {} batches ({} merged away)",
 				frames, batches + merged, batches, merged);
+			// Terrain separately, because it is the one stream that reaches the frame WITHOUT going
+			// through the shared vertex buffer -- so a frame with no terrain looks identical in every
+			// other counter to a frame with plenty.
+			RetroDragon.LOGGER.info("frame {}: terrain {} batches, {} vertices",
+				frames, terrainThisFrame, terrainVertsThisFrame);
+		}
+	}
+
+	/**
+	 * Records the frame, with a shader extension's hooks in the gaps.
+	 *
+	 * <p>With no extension this is exactly the old single call: one upload, one range, the swapchain.
+	 * The split below is skipped entirely rather than degenerating into three ranges over the same
+	 * attachment, because each range is at least one more pass, and a pass that changes nothing still
+	 * loads and stores the whole framebuffer.
+	 *
+	 * <p>With one, the order is: shadow map, opaque world, {@code onDeferred}, the rest of the world,
+	 * {@code onComposite}, the GUI, {@code onFrameEnd}. Each hook runs with the frame's encoder open
+	 * and no pass on it, which is the only state a full-screen pass or a copy can be recorded from.
+	 */
+	private static int replay() {
+		immediate.upload(LIST);
+
+		com.periut.retrodragon.api.ShaderExtension[] extensions =
+			com.periut.retrodragon.api.ShaderApi.extensions();
+		boolean redirected = shaderTargets != null && worldPipelines != null;
+
+		int worldEnd = LIST.firstNonWorldBatch(0);
+		int deferredAt = Math.min(LIST.firstTranslucentBatch(0), worldEnd);
+
+		// No extension, or NO WORLD THIS FRAME: one upload, one range, straight to the swapchain --
+		// byte for byte the path the engine takes with no shader mod installed at all.
+		//
+		// The second half of that condition is what makes a menu safe. A title screen, a pause screen
+		// over no world, a loading screen: none of them have world geometry, and every piece of the
+		// extension machinery is inert there anyway -- a skybox with nothing to paint, a composite
+		// with nothing to tonemap, a shadow map with nothing to cast. Running the split path for them
+		// meant opening passes that drew nothing, suppressing a clear that then went unpainted, and
+		// rendering a 3072-square shadow map of an empty world every frame. Taking the ordinary path
+		// removes all of it, and removes any chance of a menu frame reaching the screen half-written.
+		if (extensions.length == 0 || worldEnd == 0) {
+			return immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
+				renderer.depthView(), LIST, 0, LIST.batchCount(), pipelines, textures,
+				MemorySegment.NULL);
+		}
+
+		MemorySegment shaderGroup = shaderResources == null
+			? MemorySegment.NULL : shaderResources.group();
+		MemorySegment worldView = redirected ? shaderTargets.view() : renderer.colorView();
+		MemorySegment[] worldAux = redirected ? shaderTargets.auxViews() : NO_AUX;
+		FixedFunctionPipelines worldCache = redirected ? worldPipelines : pipelines;
+		// Where the frame was cut, and by what. A world that never ends means the GUI is being drawn
+		// into the shader extension's linear target and re-gamma'd by its composite, which looks like
+		// a gamma bug everywhere at once -- washed-out text, a too-bright menu -- rather than like a
+		// phase that was never set.
+		if (RetroDragon.VERBOSE && frames % 60 == 1) {
+			RetroDragon.LOGGER.info("frame {}: batches {}, deferred at {}, world ends at {}",
+				frames, LIST.batchCount(), deferredAt, worldEnd);
+		}
+
+		renderShadow(extensions, worldEnd, shaderGroup);
+
+		// A frame with no world batches at all is a menu. Told to the hooks so a skybox and a
+		// composite can stand down rather than grading the title screen.
+		ShaderFrameImpl context =
+			new ShaderFrameImpl(worldView, shaderGroup, redirected, worldEnd > 0);
+
+		// Before any world geometry: where a skybox is painted.
+		hook(extensions, context, HOOK_WORLD_BEGIN);
+		// Only honoured when there IS a world this frame. A claim is a promise to paint every pixel,
+		// and an extension keeps that promise in onWorldBegin -- which stands down on a menu. Taking
+		// the clear away on a frame where nothing paints leaves the target holding whatever was in it,
+		// which on a title screen is a black flicker between frames that had a world and frames that
+		// did not.
+		boolean ownClear = worldEnd > 0
+			&& com.periut.retrodragon.api.ShaderApi.worldColorClearClaimed();
+
+		int draws = immediate.render(renderer.frame(), worldView, worldAux, renderer.depthView(),
+			LIST, 0, deferredAt, worldCache, textures, shaderGroup, ownClear);
+		hook(extensions, context, HOOK_DEFERRED);
+		draws = immediate.render(renderer.frame(), worldView, worldAux, renderer.depthView(),
+			LIST, deferredAt, worldEnd, worldCache, textures, shaderGroup, ownClear);
+		hook(extensions, context, HOOK_COMPOSITE);
+		// The GUI always goes to the swapchain, whether or not the world was redirected: it is drawn
+		// in display space over an image the composite chain has already tonemapped.
+		draws = immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
+			renderer.depthView(), LIST, worldEnd, LIST.batchCount(), pipelines, textures,
+			shaderGroup);
+		hook(extensions, context, HOOK_FRAME_END);
+		// Frees bind groups replaced several frames ago; see ShaderResources.endFrame.
+		if (shaderResources != null) {
+			shaderResources.endFrame();
+		}
+		return draws;
+	}
+
+	private static final MemorySegment[] NO_AUX = new MemorySegment[0];
+
+	private static final int HOOK_WORLD_BEGIN = 3;
+	private static final int HOOK_DEFERRED = 0;
+	private static final int HOOK_COMPOSITE = 1;
+	private static final int HOOK_FRAME_END = 2;
+
+	/**
+	 * Runs one hook on every extension, in priority order.
+	 *
+	 * <p>A throwing extension is removed rather than retried. There is no useful recovery from a hook
+	 * that failed mid-frame -- it may have left a pass open, in which case every later command in the
+	 * frame is invalid -- and an extension that throws once throws every frame.
+	 */
+	private static void hook(com.periut.retrodragon.api.ShaderExtension[] extensions,
+			ShaderFrameImpl context, int which) {
+		for (com.periut.retrodragon.api.ShaderExtension extension : extensions) {
+			try {
+				switch (which) {
+					case HOOK_WORLD_BEGIN -> extension.onWorldBegin(context);
+					case HOOK_DEFERRED -> extension.onDeferred(context);
+					case HOOK_COMPOSITE -> extension.onComposite(context);
+					default -> extension.onFrameEnd(context);
+				}
+			} catch (Throwable t) {
+				RetroDragon.LOGGER.error("shader extension '{}' threw in a render hook; removing it",
+					extension.id(), t);
+				com.periut.retrodragon.api.ShaderApi.remove(extension);
+				// The hook may have left a pass open; closing it keeps the rest of the frame valid.
+				renderer.frame().endPass();
+			}
+		}
+	}
+
+	/** Renders the shadow map for the highest-priority extension that asked for one. */
+	private static void renderShadow(com.periut.retrodragon.api.ShaderExtension[] extensions,
+			int worldEnd, MemorySegment shaderGroup) {
+		for (com.periut.retrodragon.api.ShaderExtension extension : extensions) {
+			com.periut.retrodragon.api.ShaderExtension.ShadowRequest request;
+			try {
+				request = extension.shadowRequest();
+			} catch (Throwable t) {
+				RetroDragon.LOGGER.error("shader extension '{}' threw asking for a shadow pass;"
+					+ " removing it", extension.id(), t);
+				com.periut.retrodragon.api.ShaderApi.remove(extension);
+				return;
+			}
+			if (request == null) {
+				continue;
+			}
+			try {
+				WebGPUContext ctx = GpuBackend.context();
+				if (shadowMap == null) {
+					shadowMap = new ShadowMap(ctx);
+				}
+				shadowMap.ensure(request.resolution());
+				if (shadowPipelines == null) {
+					shadowPipelines = FixedFunctionPipelines.create(ctx, sharedPipelines, "shadow",
+						0, null, ShadowMap.FORMAT, true, TerrainVertex.compact());
+				}
+				if (shaderResources != null) {
+					shaderResources.setShadowMap(shadowMap.view());
+				}
+				// casterGroup, NOT the frame's group: the shadow map is the pass's own attachment,
+				// and a texture cannot be sampled and rendered into at once.
+				immediate.renderShadow(renderer.frame(), shadowMap.view(), LIST, worldEnd,
+					shadowPipelines, textures,
+					shaderResources == null ? MemorySegment.NULL : shaderResources.casterGroup(),
+					request.program(), request.terrainProgram());
+			} catch (Throwable t) {
+				RetroDragon.LOGGER.error("shadow pass for '{}' failed; removing the extension",
+					extension.id(), t);
+				com.periut.retrodragon.api.ShaderApi.remove(extension);
+			}
+			// One shadow map per frame. A second extension's request would render over the first, and
+			// the resources group holds exactly one shadow texture.
+			return;
+		}
+	}
+
+	/** The {@link com.periut.retrodragon.api.ShaderFrame} handed to the hooks. */
+	private record ShaderFrameImpl(MemorySegment world, MemorySegment group, boolean redirected,
+			boolean hasWorld) implements com.periut.retrodragon.api.ShaderFrame {
+		@Override
+		public WebGPUContext context() {
+			return GpuBackend.context();
+		}
+
+		@Override
+		public com.periut.retrodragon.gpu.Frame frame() {
+			return renderer.frame();
+		}
+
+		@Override
+		public java.lang.foreign.Arena arena() {
+			return renderer.frameArena();
+		}
+
+		@Override
+		public int width() {
+			return renderer.width();
+		}
+
+		@Override
+		public int height() {
+			return renderer.height();
+		}
+
+		@Override
+		public MemorySegment worldView() {
+			return world;
+		}
+
+		@Override
+		public MemorySegment depthView() {
+			return renderer.depthView();
+		}
+
+		@Override
+		public MemorySegment outputView() {
+			return renderer.colorView();
+		}
+
+		@Override
+		public int outputFormat() {
+			return renderer.surfaceFormat();
+		}
+
+		@Override
+		public com.periut.retrodragon.api.ShaderResources resources() {
+			return shaderResources;
+		}
+
+		@Override
+		public MemorySegment targetView(int index) {
+			return shaderTargets == null ? MemorySegment.NULL : shaderTargets.view(index);
+		}
+
+		@Override
+		public int targetFormat(int index) {
+			return shaderTargets == null ? 0 : shaderTargets.format();
+		}
+
+		@Override
+		public long frameCounter() {
+			return frames;
 		}
 	}
 
@@ -357,6 +867,14 @@ public final class WebGpuFrame {
 	public static synchronized void resize(int width, int height) {
 		if (initialized) {
 			renderer.resize(width, height);
+			if (shaderTargets != null) {
+				shaderTargets.resize(renderer.width(), renderer.height());
+				if (shaderResources != null) {
+					// A resize replaces the texture, so the composite's group has to be rebuilt around
+					// the new one. Safe here: the renderer drained the GPU before reconfiguring.
+					shaderResources.setWorldTarget(shaderTargets.view());
+				}
+			}
 		}
 	}
 
@@ -382,6 +900,12 @@ public final class WebGpuFrame {
 		// during the one operation that must not crash.
 		initialized = false;
 		failed = true;
+		// Extensions first, and before the renderer: they hold GPU objects created from the same
+		// device, and releasing the surface out from under work that still references them is the
+		// hazard the whole teardown order exists to avoid.
+		com.periut.retrodragon.api.ShaderApi.stopAll();
+		releaseExtensionResources();
+		extensionsStarted = false;
 		if (renderer != null) {
 			// Releases the surface, and with it any drawable still held, while the window's layer is
 			// still alive. This is the ordering the whole shutdown path exists to guarantee.
@@ -400,6 +924,11 @@ public final class WebGpuFrame {
 		if (pipelines != null) {
 			pipelines.close();
 			pipelines = null;
+		}
+		// After every cache that borrows its shader modules and layouts.
+		if (sharedPipelines != null) {
+			sharedPipelines.close();
+			sharedPipelines = null;
 		}
 		RetroDragon.LOGGER.info("WebGPU renderer shut down after {} frames", frames);
 	}

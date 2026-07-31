@@ -92,12 +92,26 @@ public final class Bindings {
 
 	public static MemorySegment pipelineLayout(WebGPUContext ctx, Arena arena, String label,
 			MemorySegment bindGroupLayout) {
-		MemorySegment layouts = arena.allocate(ValueLayout.ADDRESS, 1);
-		layouts.setAtIndex(ValueLayout.ADDRESS, 0, bindGroupLayout);
+		return pipelineLayout(ctx, arena, label, new MemorySegment[] { bindGroupLayout });
+	}
+
+	/**
+	 * A layout over several bind groups, in binding order.
+	 *
+	 * <p>Two of them, in practice: group 0 is the engine's per-draw state and group 1 is a shader
+	 * extension's per-frame resources. They are separate groups precisely so the second can be bound
+	 * once and left alone while the first changes with every draw.
+	 */
+	public static MemorySegment pipelineLayout(WebGPUContext ctx, Arena arena, String label,
+			MemorySegment[] bindGroupLayouts) {
+		MemorySegment layouts = arena.allocate(ValueLayout.ADDRESS, bindGroupLayouts.length);
+		for (int i = 0; i < bindGroupLayouts.length; i++) {
+			layouts.setAtIndex(ValueLayout.ADDRESS, i, bindGroupLayouts[i]);
+		}
 
 		MemorySegment desc = WGPUPipelineLayoutDescriptor.allocate(arena);
 		Shaders.stringView(arena, WGPUPipelineLayoutDescriptor.label(desc), label);
-		WGPUPipelineLayoutDescriptor.bindGroupLayoutCount(desc, 1);
+		WGPUPipelineLayoutDescriptor.bindGroupLayoutCount(desc, bindGroupLayouts.length);
 		WGPUPipelineLayoutDescriptor.bindGroupLayouts(desc, layouts);
 
 		MemorySegment layout = wgpuDeviceCreatePipelineLayout(ctx.device(), desc);

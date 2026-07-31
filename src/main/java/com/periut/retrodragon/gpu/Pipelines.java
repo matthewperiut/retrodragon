@@ -154,28 +154,49 @@ public final class Pipelines {
 		WGPUMultisampleState.mask(multisample, 0xFFFFFFFF);
 		WGPUMultisampleState.alphaToCoverageEnabled(multisample, spec.alphaToCoverage ? 1 : 0);
 
-		MemorySegment target = WGPUColorTargetState.allocate(arena);
-		WGPUColorTargetState.format(target, spec.colorFormat);
-		WGPUColorTargetState.writeMask(target, Flags.COLOR_WRITE_ALL);
-		if (spec.blend) {
-			MemorySegment blend = WGPUBlendState.allocate(arena);
-			MemorySegment color = WGPUBlendState.color(blend);
-			WGPUBlendComponent.operation(color, WGPUBlendOperation_Add());
-			WGPUBlendComponent.srcFactor(color, spec.blendSrcColor);
-			WGPUBlendComponent.dstFactor(color, spec.blendDstColor);
-			MemorySegment alpha = WGPUBlendState.alpha(blend);
-			WGPUBlendComponent.operation(alpha, WGPUBlendOperation_Add());
-			WGPUBlendComponent.srcFactor(alpha, spec.blendSrcAlpha);
-			WGPUBlendComponent.dstFactor(alpha, spec.blendDstAlpha);
-			WGPUColorTargetState.blend(target, blend);
-		}
+		// A depth-only pipeline still has a fragment stage -- it just writes NO COLOUR.
+		//
+		// It is tempting to drop the stage entirely, and for a shadow map made of solid blocks that
+		// would be right and faster. It is wrong for this game: leaves, tall grass, glass panes and
+		// every cross-shaped plant are opaque quads that are mostly transparent texels, and their
+		// shape exists only in the alpha channel. Without a fragment stage there is nothing to
+		// discard them with, and every tree casts the shadow of a solid box.
+		//
+		// A fragment stage with zero targets is exactly that: the texture is sampled, the alpha test
+		// runs, and nothing is written but depth.
+		{
+			int targetCount = spec.depthOnly ? 0 : 1 + spec.auxColorFormats.length;
+			MemorySegment targets = targetCount == 0
+				? MemorySegment.NULL
+				: WGPUColorTargetState.allocateArray(targetCount, arena);
+			for (int i = 0; i < targetCount; i++) {
+				MemorySegment target = WGPUColorTargetState.asSlice(targets, i);
+				WGPUColorTargetState.format(target,
+					i == 0 ? spec.colorFormat : spec.auxColorFormats[i - 1]);
+				WGPUColorTargetState.writeMask(target, Flags.COLOR_WRITE_ALL);
+				// Target 0 only; see PipelineSpec.auxColorFormats for why blending an aux attachment
+				// is not a thing anyone wants.
+				if (spec.blend && i == 0) {
+					MemorySegment blend = WGPUBlendState.allocate(arena);
+					MemorySegment color = WGPUBlendState.color(blend);
+					WGPUBlendComponent.operation(color, WGPUBlendOperation_Add());
+					WGPUBlendComponent.srcFactor(color, spec.blendSrcColor);
+					WGPUBlendComponent.dstFactor(color, spec.blendDstColor);
+					MemorySegment alpha = WGPUBlendState.alpha(blend);
+					WGPUBlendComponent.operation(alpha, WGPUBlendOperation_Add());
+					WGPUBlendComponent.srcFactor(alpha, spec.blendSrcAlpha);
+					WGPUBlendComponent.dstFactor(alpha, spec.blendDstAlpha);
+					WGPUColorTargetState.blend(target, blend);
+				}
+			}
 
-		MemorySegment fragment = WGPUFragmentState.allocate(arena);
-		WGPUFragmentState.module(fragment, spec.shader);
-		Shaders.stringView(arena, WGPUFragmentState.entryPoint(fragment), spec.fragmentEntry);
-		WGPUFragmentState.targetCount(fragment, 1);
-		WGPUFragmentState.targets(fragment, target);
-		WGPURenderPipelineDescriptor.fragment(desc, fragment);
+			MemorySegment fragment = WGPUFragmentState.allocate(arena);
+			WGPUFragmentState.module(fragment, spec.shader);
+			Shaders.stringView(arena, WGPUFragmentState.entryPoint(fragment), spec.fragmentEntry);
+			WGPUFragmentState.targetCount(fragment, targetCount);
+			WGPUFragmentState.targets(fragment, targets);
+			WGPURenderPipelineDescriptor.fragment(desc, fragment);
+		}
 
 		MemorySegment pipeline = wgpuDeviceCreateRenderPipeline(ctx.device(), desc);
 		if (pipeline.equals(MemorySegment.NULL)) {

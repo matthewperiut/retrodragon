@@ -99,6 +99,23 @@ public final class ImmediateRenderer implements AutoCloseable {
 	 */
 	public int render(Frame frame, MemorySegment colorView, MemorySegment depthView,
 			DrawList list, FixedFunctionPipelines pipelines, TextureStore textures) {
+		upload(list);
+		return render(frame, colorView, NO_AUX, depthView, list, 0, list.batchCount(), pipelines,
+			textures, MemorySegment.NULL);
+	}
+
+	private static final MemorySegment[] NO_AUX = new MemorySegment[0];
+
+	/**
+	 * Moves the frame's vertices, uniforms and indices to the GPU.
+	 *
+	 * <p>Separate from {@link #render} because a frame is now replayed in SEVERAL ranges -- world,
+	 * then GUI, with a shader extension's hooks between them -- and all of them draw from the same
+	 * three buffers. Uploading per range would re-send the whole frame once per range.
+	 *
+	 * <p>Resets the per-frame counters, so it must be called before the first range and not between.
+	 */
+	public void upload(DrawList list) {
 		batchesLastFrame = list.batchCount();
 		drawsLastFrame = 0;
 		binds = 0;
@@ -126,38 +143,86 @@ public final class ImmediateRenderer implements AutoCloseable {
 			}
 			ensureIndices(list);
 		}
+	}
 
+	/**
+	 * Records one range of the frame into passes over the given attachments.
+	 *
+	 * <p>Opening and closing the passes here rather than in the caller is what makes beta's
+	 * mid-frame {@code glClear} calls work: a WebGPU clear is a pass load op, so "clear the depth
+	 * buffer now" can only mean "end this pass and start another".
+	 *
+	 * @param rangeFirst first batch to draw, inclusive
+	 * @param rangeEnd   last batch, exclusive. Segments are clipped to the range, so a clear that
+	 *                   falls inside it still starts a new pass and one outside it is skipped.
+	 * @param shaderGroup a shader extension's {@code @group(1)}, or {@link MemorySegment#NULL}
+	 * @return the number of draw calls issued, cumulative across ranges since {@link #upload}
+	 */
+	public int render(Frame frame, MemorySegment colorView, MemorySegment[] aux,
+			MemorySegment depthView, DrawList list, int rangeFirst, int rangeEnd,
+			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup) {
+		return render(frame, colorView, aux, depthView, list, rangeFirst, rangeEnd, pipelines,
+			textures, shaderGroup, false);
+	}
+
+	/**
+	 * @param suppressColorClear true when a shader extension has already painted every pixel -- see
+	 *                           {@link com.periut.retrodragon.api.ShaderApi#claimWorldColorClear}.
+	 *                           The DEPTH clear is unaffected: the world needs it either way.
+	 */
+	public int render(Frame frame, MemorySegment colorView, MemorySegment[] aux,
+			MemorySegment depthView, DrawList list, int rangeFirst, int rangeEnd,
+			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup,
+			boolean suppressColorClear) {
 		try (Arena frameArena = Arena.ofConfined()) {
 			for (int segment = 0; segment < list.segmentCount(); segment++) {
-				int first = list.segmentFirstBatch(segment);
-				int end = list.segmentEndBatch(segment);
-				boolean clearsColor = list.segmentClearsColor(segment);
-				boolean clearsDepth = list.segmentClearsDepth(segment);
-				// An empty segment that clears nothing has no effect at all; skipping it avoids a
-				// pass whose only job is to load and store the attachments unchanged.
-				if (first == end && !clearsColor && !clearsDepth) {
+				int segmentFirst = list.segmentFirstBatch(segment);
+				int segmentEnd = list.segmentEndBatch(segment);
+				// A clear belongs to the range that CONTAINS its boundary. Applying it to every range
+				// the segment overlaps would clear the world target again halfway through the frame.
+				boolean ownsClear = segmentFirst >= rangeFirst && segmentFirst < rangeEnd
+					|| segmentFirst < rangeFirst && segment == 0 && rangeFirst == 0;
+				int first = Math.max(segmentFirst, rangeFirst);
+				int end = Math.min(segmentEnd, rangeEnd);
+				if (first >= end && !ownsClear) {
 					continue;
 				}
-				MemorySegment pass = frame.beginPass(frameArena, colorView, clearsColor,
+				boolean clearsColor = ownsClear && !suppressColorClear
+					&& list.segmentClearsColor(segment);
+				boolean clearsDepth = ownsClear && list.segmentClearsDepth(segment);
+				// An empty segment that clears nothing has no effect at all; skipping it avoids a
+				// pass whose only job is to load and store the attachments unchanged.
+				if (first >= end && !clearsColor && !clearsDepth) {
+					continue;
+				}
+				MemorySegment pass = frame.beginPass(frameArena, colorView, aux, clearsColor,
 					list.segmentClear(segment, 0), list.segmentClear(segment, 1),
 					list.segmentClear(segment, 2), list.segmentClear(segment, 3),
 					depthView, clearsDepth);
-				drawSegment(pass, frameArena, list, first, end, pipelines, textures);
+				drawSegment(pass, frameArena, list, first, Math.max(first, end), pipelines, textures,
+					shaderGroup);
 				frame.endPass();
 			}
 		}
 		if (dropped > 0) {
 			com.periut.retrodragon.RetroDragon.detail(
 				"{} batches dropped: their buffer was released after being captured", dropped);
+			dropped = 0;
 		}
 		return drawsLastFrame;
 	}
 
 	private void drawSegment(MemorySegment pass, Arena frameArena, DrawList list, int first, int end,
-			FixedFunctionPipelines pipelines, TextureStore textures) {
+			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup) {
 		if (first == end) {
 			return;
 		}
+		boolean hasShaderGroup = !shaderGroup.equals(MemorySegment.NULL);
+		// Whether group 1 is currently bound AND still compatible with the pipeline in force.
+		// Setting a pipeline whose layout does not include group 1 unbinds it, per WebGPU's
+		// bind-group compatibility rules -- so the flag has to be cleared there, not merely on a
+		// pass boundary, or the first extension draw after a stock one would run with nothing bound.
+		boolean groupBound = false;
 		MemorySegment offsets = frameArena.allocate(ValueLayout.JAVA_INT, 1);
 		long previousKey = -1L;
 		boolean quadsBound = false;
@@ -169,7 +234,10 @@ public final class ImmediateRenderer implements AutoCloseable {
 
 		for (int batch = first; batch < end; batch++) {
 			int count = list.count(batch);
-			if (count <= 0) {
+			// Caster-only geometry is recorded for the shadow map and must never reach the screen;
+			// see DrawPhase.CASTER_ONLY.
+			if (count <= 0
+					|| list.phase(batch) == com.periut.retrodragon.api.DrawPhase.CASTER_ONLY) {
 				continue;
 			}
 			int glMode = list.glMode(batch);
@@ -201,6 +269,13 @@ public final class ImmediateRenderer implements AutoCloseable {
 			if (key != previousKey) {
 				wgpuRenderPassEncoderSetPipeline(pass, pipelines.get(key));
 				previousKey = key;
+				groupBound = false;
+			}
+			// Group 1 is per-FRAME: one bind for every extension draw in the pass, versus group 0's
+			// bind per state change. That asymmetry is the reason the two are separate groups.
+			if (hasShaderGroup && !groupBound && usesShaderGroup(key)) {
+				wgpuRenderPassEncoderSetBindGroup(pass, 1, shaderGroup, 0, MemorySegment.NULL);
+				groupBound = true;
 			}
 			// The bind group and its dynamic uniform offset are one call, so a batch that changes
 			// neither can skip it. Terrain makes this worth doing: every section in a 1024-block
@@ -256,6 +331,139 @@ public final class ImmediateRenderer implements AutoCloseable {
 			}
 			drawsLastFrame++;
 		}
+	}
+
+	/**
+	 * Replays this frame's shadow-casting batches into a depth-only pass.
+	 *
+	 * <p>The same vertices, the same per-draw uniform blocks and the same bind groups as the visible
+	 * frame -- only the PROGRAM changes. The shadow program reads the light's matrices from the
+	 * extension's {@code @group(1)} and combines them with the per-draw modelview already in group 0,
+	 * so nothing has to be re-uploaded and no second uniform buffer exists.
+	 *
+	 * <p>This is the same frame the camera is about to see, not the previous one. Every
+	 * immediate-mode shadow implementation on this game has had to live with a frame of staleness,
+	 * because under GL the world had already been submitted by the time a shadow pass could run.
+	 * Here the whole frame is recorded before any of it executes, so the shadow map can simply be
+	 * recorded first.
+	 *
+	 * @param rangeEnd exclusive end of the world's batches -- the GUI must not cast shadows
+	 * @param program  the caster program, from the extension's {@link
+	 *                 com.periut.retrodragon.api.ShaderExtension.ShadowRequest}
+	 * @return how many batches were drawn into the map
+	 */
+	public int renderShadow(Frame frame, MemorySegment depthView, DrawList list, int rangeEnd,
+			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup,
+			int program, int terrainProgram) {
+		int drawn = 0;
+		try (Arena frameArena = Arena.ofConfined()) {
+			MemorySegment pass = frame.beginPass(frameArena, MemorySegment.NULL, NO_AUX, false,
+				0.0F, 0.0F, 0.0F, 0.0F, depthView, true);
+			MemorySegment offsets = frameArena.allocate(ValueLayout.JAVA_INT, 1);
+			long previousKey = -1L;
+			boolean quadsBound = false;
+			boolean fansBound = false;
+			boolean groupBound = false;
+			Object boundBuffer = this;
+			int previousTexture = Integer.MIN_VALUE;
+			int previousUniformOffset = -1;
+
+			for (int batch = 0; batch < rangeEnd; batch++) {
+				int count = list.count(batch);
+				if (count <= 0 || !com.periut.retrodragon.api.DrawPhase.castsShadow(list.phase(batch))) {
+					continue;
+				}
+				Object source = list.buffer(batch);
+				GpuBuffer buffer = source == null ? vertices : (GpuBuffer) source;
+				if (!buffer.valid()) {
+					boundBuffer = this;
+					continue;
+				}
+				if (source != boundBuffer) {
+					boundBuffer = source;
+					wgpuRenderPassEncoderSetVertexBuffer(pass, 0, buffer.handle(), 0, buffer.capacity());
+				}
+				// Which caster: the one matching the layout this batch was captured in. A terrain
+				// batch drawn through the fixed-function caster would fetch a normal that its buffer
+				// does not contain, and read the next vertex's position as one.
+				long original = list.pipelineKey(batch);
+				long key = com.periut.retrodragon.shim.PipelineKey.forShadow(original,
+					isTerrainLayout(com.periut.retrodragon.shim.PipelineKey.program(original))
+						? terrainProgram : program);
+				if (key != previousKey) {
+					wgpuRenderPassEncoderSetPipeline(pass, pipelines.get(key));
+					previousKey = key;
+					groupBound = false;
+				}
+				if (!groupBound && !shaderGroup.equals(MemorySegment.NULL)) {
+					wgpuRenderPassEncoderSetBindGroup(pass, 1, shaderGroup, 0, MemorySegment.NULL);
+					groupBound = true;
+				}
+				// The texture still matters: the caster program alpha-tests, or leaves and tall grass
+				// cast solid rectangles.
+				int texture = list.texture(batch);
+				int uniformOffset = list.uniformOffset(batch);
+				if (texture != previousTexture || uniformOffset != previousUniformOffset) {
+					wgpuRenderPassEncoderSetBindGroup(pass, 0, bindGroup(texture, textures, pipelines),
+						1, writeOffset(offsets, uniformOffset));
+					previousTexture = texture;
+					previousUniformOffset = uniformOffset;
+				}
+				int glMode = list.glMode(batch);
+				switch (Primitives.indexing(glMode)) {
+					case QUADS -> {
+						if (!quadsBound) {
+							wgpuRenderPassEncoderSetIndexBuffer(pass, quadIndices.handle(),
+								WGPUIndexFormat_Uint32(), 0, quadIndices.capacity());
+							quadsBound = true;
+							fansBound = false;
+						}
+						int quads = count / QuadIndices.VERTICES_PER_QUAD;
+						int baseVertex = list.firstVertex(batch);
+						for (int done = 0; done < quads; done += MAX_INDEXED_QUADS) {
+							int chunk = Math.min(MAX_INDEXED_QUADS, quads - done);
+							wgpuRenderPassEncoderDrawIndexed(pass,
+								chunk * QuadIndices.INDICES_PER_QUAD, 1, 0,
+								baseVertex + done * QuadIndices.VERTICES_PER_QUAD, 0);
+						}
+					}
+					case FAN -> {
+						if (!fansBound) {
+							wgpuRenderPassEncoderSetIndexBuffer(pass, fanIndices.handle(),
+								WGPUIndexFormat_Uint32(), 0, fanIndices.capacity());
+							fansBound = true;
+							quadsBound = false;
+						}
+						wgpuRenderPassEncoderDrawIndexed(pass, Primitives.indexCount(glMode, count), 1,
+							0, list.firstVertex(batch), 0);
+					}
+					case DIRECT ->
+						wgpuRenderPassEncoderDraw(pass, count, 1, list.firstVertex(batch), 0);
+				}
+				drawn++;
+			}
+			frame.endPass();
+		}
+		return drawn;
+	}
+
+	/** Whether a program reads the engine's packed terrain stream rather than beta's own vertex. */
+	private static boolean isTerrainLayout(int program) {
+		com.periut.retrodragon.api.ProgramSpec spec =
+			com.periut.retrodragon.api.ShaderApi.program(program);
+		if (spec != null) {
+			return spec.layout() == com.periut.retrodragon.api.ProgramSpec.VertexLayout.TERRAIN;
+		}
+		return program == com.periut.retrodragon.shim.PipelineKey.PROGRAM_TERRAIN
+			|| program == com.periut.retrodragon.shim.PipelineKey.PROGRAM_TERRAIN_OPAQUE;
+	}
+
+	/** Whether the key's program declared {@code @group(1)}; built-ins never do. */
+	private static boolean usesShaderGroup(long key) {
+		com.periut.retrodragon.api.ProgramSpec spec =
+			com.periut.retrodragon.api.ShaderApi.program(
+				com.periut.retrodragon.shim.PipelineKey.program(key));
+		return spec != null && spec.shaderGroup();
 	}
 
 	private static MemorySegment writeOffset(MemorySegment offsets, int value) {

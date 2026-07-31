@@ -63,27 +63,62 @@ public final class Frame implements AutoCloseable {
 	public MemorySegment beginPass(Arena arena, MemorySegment colorView, boolean clearColor,
 			float r, float g, float b, float a,
 			MemorySegment depthView, boolean clearDepth) {
+		return beginPass(arena, colorView, NO_AUX, clearColor, r, g, b, a, depthView, clearDepth);
+	}
+
+	private static final MemorySegment[] NO_AUX = new MemorySegment[0];
+
+	/**
+	 * As above, with further colour attachments and an optional {@code NULL} colour view.
+	 *
+	 * <p>Two extensions, both for shader extensions rather than for beta:
+	 *
+	 * <ul>
+	 * <li>{@code aux} views become attachments 1..n, so one draw can write a G-buffer. They always
+	 *     take the same load op as attachment 0 -- a pass that clears the scene clears the material
+	 *     data it is about to rewrite, and one that continues a pass loads both.</li>
+	 * <li>{@code colorView} may be {@link MemorySegment#NULL}, for a depth-only pass. WebGPU allows a
+	 *     pass with zero colour attachments provided it has a depth one, which is exactly a shadow
+	 *     map.</li>
+	 * </ul>
+	 */
+	public MemorySegment beginPass(Arena arena, MemorySegment colorView, MemorySegment[] aux,
+			boolean clearColor, float r, float g, float b, float a,
+			MemorySegment depthView, boolean clearDepth) {
 		if (!pass.equals(MemorySegment.NULL)) {
 			throw new IllegalStateException("a render pass is already open on this frame");
 		}
-
-		MemorySegment attachment = WGPURenderPassColorAttachment.allocate(arena);
-		WGPURenderPassColorAttachment.view(attachment, colorView);
-		WGPURenderPassColorAttachment.loadOp(attachment,
-			clearColor ? WGPULoadOp_Clear() : WGPULoadOp_Load());
-		WGPURenderPassColorAttachment.storeOp(attachment, WGPUStoreOp_Store());
-		// Sentinel meaning "not a 3D slice"; zero would name slice 0 of a volume texture.
-		WGPURenderPassColorAttachment.depthSlice(attachment, WGPU_DEPTH_SLICE_UNDEFINED());
-
-		MemorySegment clear = WGPURenderPassColorAttachment.clearValue(attachment);
-		WGPUColor.r(clear, r);
-		WGPUColor.g(clear, g);
-		WGPUColor.b(clear, b);
-		WGPUColor.a(clear, a);
+		boolean hasColor = !colorView.equals(MemorySegment.NULL);
+		if (!hasColor && depthView.equals(MemorySegment.NULL)) {
+			throw new IllegalStateException("a render pass needs at least one attachment");
+		}
 
 		MemorySegment desc = WGPURenderPassDescriptor.allocate(arena);
-		WGPURenderPassDescriptor.colorAttachmentCount(desc, 1);
-		WGPURenderPassDescriptor.colorAttachments(desc, attachment);
+		if (hasColor) {
+			int count = 1 + aux.length;
+			MemorySegment attachments = WGPURenderPassColorAttachment.allocateArray(count, arena);
+			for (int i = 0; i < count; i++) {
+				MemorySegment attachment = WGPURenderPassColorAttachment.asSlice(attachments, i);
+				WGPURenderPassColorAttachment.view(attachment, i == 0 ? colorView : aux[i - 1]);
+				WGPURenderPassColorAttachment.loadOp(attachment,
+					clearColor ? WGPULoadOp_Clear() : WGPULoadOp_Load());
+				WGPURenderPassColorAttachment.storeOp(attachment, WGPUStoreOp_Store());
+				// Sentinel meaning "not a 3D slice"; zero would name slice 0 of a volume texture.
+				WGPURenderPassColorAttachment.depthSlice(attachment, WGPU_DEPTH_SLICE_UNDEFINED());
+
+				MemorySegment clear = WGPURenderPassColorAttachment.clearValue(attachment);
+				// Attachment 0 takes the game's clear colour; the aux targets clear to zero, which is
+				// "no material here" for every encoding a pack is likely to choose.
+				WGPUColor.r(clear, i == 0 ? r : 0.0F);
+				WGPUColor.g(clear, i == 0 ? g : 0.0F);
+				WGPUColor.b(clear, i == 0 ? b : 0.0F);
+				WGPUColor.a(clear, i == 0 ? a : 0.0F);
+			}
+			WGPURenderPassDescriptor.colorAttachmentCount(desc, count);
+			WGPURenderPassDescriptor.colorAttachments(desc, attachments);
+		} else {
+			WGPURenderPassDescriptor.colorAttachmentCount(desc, 0);
+		}
 
 		if (!depthView.equals(MemorySegment.NULL)) {
 			MemorySegment depth = WGPURenderPassDepthStencilAttachment.allocate(arena);
@@ -117,12 +152,58 @@ public final class Frame implements AutoCloseable {
 		pass = MemorySegment.NULL;
 	}
 
+	private MemorySegment computePass = MemorySegment.NULL;
+
+	/**
+	 * Opens a compute pass on this frame's encoder.
+	 *
+	 * <p>A compute pass is the only place a dispatch can be recorded, and WebGPU allows exactly one
+	 * pass -- of either kind -- open on an encoder at a time. So this refuses to start while a render
+	 * pass is up rather than letting Dawn reject the whole command buffer later, which costs the frame
+	 * and reports it against whatever was recorded next.
+	 *
+	 * <p><b>One pass per dispatch is the normal shape here, not a waste.</b> WebGPU's read/write
+	 * hazard rules are evaluated per pass: a texture written by one dispatch and read by the next
+	 * cannot be both inside a single pass, and that is exactly what a ping-pong is. Between passes the
+	 * implementation inserts the barrier itself, so splitting them is what makes the ping-pong legal
+	 * as well as correct.
+	 *
+	 * @param arena must stay open until {@link #endComputePass()}; Dawn reads the descriptor during
+	 *              {@code beginComputePass}
+	 */
+	public MemorySegment beginComputePass(Arena arena, String label) {
+		if (!pass.equals(MemorySegment.NULL)) {
+			throw new IllegalStateException("a render pass is open on this frame; a compute pass"
+				+ " cannot start until it ends");
+		}
+		if (!computePass.equals(MemorySegment.NULL)) {
+			throw new IllegalStateException("a compute pass is already open on this frame");
+		}
+		MemorySegment desc = com.periut.webgpu.WGPUComputePassDescriptor.allocate(arena);
+		Shaders.stringView(arena, com.periut.webgpu.WGPUComputePassDescriptor.label(desc), label);
+		computePass = wgpuCommandEncoderBeginComputePass(encoder, desc);
+		if (computePass.equals(MemorySegment.NULL)) {
+			throw new IllegalStateException("wgpuCommandEncoderBeginComputePass returned NULL");
+		}
+		return computePass;
+	}
+
+	public void endComputePass() {
+		if (computePass.equals(MemorySegment.NULL)) {
+			return;
+		}
+		wgpuComputePassEncoderEnd(computePass);
+		wgpuComputePassEncoderRelease(computePass);
+		computePass = MemorySegment.NULL;
+	}
+
 	/** Finishes the encoder and hands the command buffer to the queue. Idempotent. */
 	public void submit() {
 		if (submitted) {
 			return;
 		}
 		endPass();
+		endComputePass();
 		submitted = true;
 		try (Arena tmp = Arena.ofConfined()) {
 			MemorySegment cmd = wgpuCommandEncoderFinish(encoder, MemorySegment.NULL);

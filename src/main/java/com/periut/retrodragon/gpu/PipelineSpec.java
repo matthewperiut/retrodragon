@@ -26,6 +26,32 @@ public final class PipelineSpec {
 	public int[][] attributes = new int[0][];
 
 	public int colorFormat = WGPUTextureFormat_BGRA8Unorm();
+
+	/**
+	 * Additional colour targets, for a pass that writes more than one attachment.
+	 *
+	 * <p>Empty for the ordinary single-target case, which is everything the engine itself draws.
+	 * A shader extension uses it for a G-buffer: the world pass writes its shaded colour to target 0
+	 * and material data (emissive, normal, whatever the pack defines) to targets 1..n in the same
+	 * draw, which is the only way to get it without rendering the world twice.
+	 *
+	 * <p>Only target 0 ever blends. A blend equation on an auxiliary attachment would mix material
+	 * data with whatever the previous draw left, which is meaningless -- the aux targets carry
+	 * per-fragment facts, not light being accumulated.
+	 */
+	public int[] auxColorFormats = new int[0];
+
+	/**
+	 * True for a pass with no colour attachment at all -- a shadow map, which writes only depth.
+	 *
+	 * <p>The fragment stage is still built, with zero targets. Dropping it entirely would be faster
+	 * and is what a shadow map made of solid blocks wants, but this game's leaves, grass and glass
+	 * are opaque quads whose shape lives in the alpha channel: with nothing to discard them, every
+	 * tree casts the shadow of a box. A shader extension that needs a colour channel in its shadow
+	 * map -- a translucent-shadow pack -- leaves this false and declares a target instead.
+	 */
+	public boolean depthOnly;
+
 	/** 0 for a colour-only pipeline. Must match the pass's depth attachment when set. */
 	public int depthFormat;
 	public boolean depthTest;
@@ -98,6 +124,19 @@ public final class PipelineSpec {
 
 	public PipelineSpec color(int format) {
 		this.colorFormat = format;
+		return this;
+	}
+
+	/** Colour target 0 plus {@code aux} further attachments; see {@link #auxColorFormats}. */
+	public PipelineSpec color(int format, int[] aux) {
+		this.colorFormat = format;
+		this.auxColorFormats = aux == null ? new int[0] : aux;
+		return this;
+	}
+
+	/** No colour attachment; see {@link #depthOnly}. */
+	public PipelineSpec depthOnly() {
+		this.depthOnly = true;
 		return this;
 	}
 

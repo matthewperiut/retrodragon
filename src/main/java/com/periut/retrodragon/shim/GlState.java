@@ -315,8 +315,32 @@ public final class GlState {
 		textureEnabled = enabled;
 	}
 
+	/**
+	 * Whether {@code GL_TEXTURE_2D} is on.
+	 *
+	 * <p>Distinct from "which texture is bound", and the distinction matters to routing: beta leaves
+	 * a texture BOUND while drawing untextured geometry -- the sky plate, the void plate, entity
+	 * shadows -- so the bound name says nothing about whether the draw samples anything. A shader
+	 * extension told only the name cannot tell beta's void plate from the block atlas.
+	 */
+	public boolean textured() {
+		return textureEnabled;
+	}
+
 	public void setLightingEnabled(boolean enabled) {
 		lightingEnabled = enabled;
+	}
+
+	/**
+	 * Whether {@code GL_LIGHTING} is on.
+	 *
+	 * <p>Beta's own separation of world geometry that takes directional shading -- mobs, dropped
+	 * items, the held block -- from geometry that does not: particles, the sky, the GUI. A shader
+	 * extension routes on it, because it is the closest thing beta has to saying "this is a lit
+	 * surface in the world".
+	 */
+	public boolean lit() {
+		return lightingEnabled;
 	}
 
 	public void setFogEnabled(boolean enabled) {

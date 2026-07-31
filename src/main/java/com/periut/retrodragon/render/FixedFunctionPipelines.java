@@ -1,5 +1,7 @@
 package com.periut.retrodragon.render;
 
+import com.periut.retrodragon.api.ProgramSpec;
+import com.periut.retrodragon.api.ShaderApi;
 import com.periut.retrodragon.gpu.Bindings;
 import com.periut.retrodragon.gpu.PipelineSpec;
 import com.periut.retrodragon.gpu.Pipelines;
@@ -31,6 +33,15 @@ import static com.periut.webgpu.webgpu_h.*;
  * pipeline. An inferred layout belongs to its pipeline, so a bind group made for one would be
  * rejected by every other -- the uniform binding would have to be rebuilt on every blend-mode change,
  * which is exactly the per-draw cost this whole path exists to avoid.
+ *
+ * <h2>One cache per set of attachments</h2>
+ *
+ * A pipeline bakes in the FORMAT and COUNT of what it writes, so the same draw state needs different
+ * pipelines for the swapchain, for a shader extension's float world target with its G-buffer
+ * attachments, and for a depth-only shadow map. Rather than widening the key -- which would multiply
+ * every entry in it by a dimension almost no draw varies along -- there is one instance of this per
+ * target layout, and they share the shader modules and layouts through the {@link Shared} they were
+ * created from.
  */
 public final class FixedFunctionPipelines implements AutoCloseable {
 	/** Beta's own vertex layout, unchanged: position 3f, uv 2f, colour unorm8x4, normal snorm8x4. */
@@ -72,37 +83,170 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	private static final String ALPHA_TEST_BEGIN = "//@ALPHA_TEST_BEGIN";
 	private static final String ALPHA_TEST_END = "//@ALPHA_TEST_END";
 
+	/**
+	 * What every target layout has in common: the compiled shader modules and the two pipeline
+	 * layouts.
+	 *
+	 * <p>Shared rather than duplicated because a shader module is expensive to build and identical
+	 * across attachment sets -- the world pass and the shadow pass run the same WGSL. Compiling one
+	 * per cache would triple the startup cost of every program an extension registers.
+	 */
+	public static final class Shared implements AutoCloseable {
+		private final WebGPUContext ctx;
+		private final Arena arena = Arena.ofShared();
+		private final MemorySegment[] shaders = new MemorySegment[PipelineKey.MAX_PROGRAMS];
+		private final MemorySegment bindGroupLayout;
+		private final MemorySegment pipelineLayout;
+		/** Group 0 plus the extension's group 1; null until an extension exists. */
+		private MemorySegment shaderPipelineLayout = MemorySegment.NULL;
+
+		private Shared(WebGPUContext ctx) {
+			this.ctx = ctx;
+			this.bindGroupLayout = Bindings.fixedFunctionLayout(ctx, arena, GlState.UNIFORM_BYTES);
+			this.pipelineLayout =
+				Bindings.pipelineLayout(ctx, arena, "retrodragon-fixedfunc", bindGroupLayout);
+		}
+
+		public static Shared create(WebGPUContext ctx) {
+			return new Shared(ctx);
+		}
+
+		public MemorySegment bindGroupLayout() {
+			return bindGroupLayout;
+		}
+
+		/**
+		 * The compiled module for a program, built on first use.
+		 *
+		 * <p>Lazy because an extension registers a program per draw family and a given world reaches
+		 * only some of them -- the nether never draws clouds, a clear day never draws weather. A
+		 * program that is never routed to costs its source string and nothing else.
+		 */
+		MemorySegment shader(int program) {
+			MemorySegment cached = shaders[program];
+			if (cached != null) {
+				return cached;
+			}
+			String label;
+			String source;
+			if (program < ShaderApi.builtInCount()) {
+				label = "retrodragon-program-" + program;
+				source = builtIn(program);
+			} else {
+				ProgramSpec spec = ShaderApi.program(program);
+				if (spec == null) {
+					throw new IllegalStateException("no program registered with id " + program);
+				}
+				label = spec.name();
+				source = spec.source();
+			}
+			MemorySegment module = Shaders.compile(ctx, arena, label, source);
+			if (module.equals(MemorySegment.NULL)) {
+				throw new IllegalStateException("program '" + label + "' failed to compile");
+			}
+			shaders[program] = module;
+			return module;
+		}
+
+		/**
+		 * The pipeline layout a program needs: group 0 alone, or group 0 and the extension group.
+		 *
+		 * <p>Built on demand rather than at construction because the extension's bind group layout
+		 * does not exist until an extension has started, and the engine's own programs never need it.
+		 */
+		MemorySegment layoutFor(int program) {
+			ProgramSpec spec = ShaderApi.program(program);
+			if (spec == null || !spec.shaderGroup()) {
+				return pipelineLayout;
+			}
+			if (shaderPipelineLayout.equals(MemorySegment.NULL)) {
+				var resources = ShaderApi.resources();
+				if (resources == null) {
+					throw new IllegalStateException("program '" + spec.name()
+						+ "' declares @group(1) but no shader resources exist yet");
+				}
+				shaderPipelineLayout = Bindings.pipelineLayout(ctx, arena, "retrodragon-shader",
+					new MemorySegment[] { bindGroupLayout, resources.layout() });
+			}
+			return shaderPipelineLayout;
+		}
+
+		@Override
+		public void close() {
+			for (MemorySegment shader : shaders) {
+				if (shader != null && !shader.equals(MemorySegment.NULL)) {
+					wgpuShaderModuleRelease(shader);
+				}
+			}
+			if (!shaderPipelineLayout.equals(MemorySegment.NULL)) {
+				wgpuPipelineLayoutRelease(shaderPipelineLayout);
+			}
+			wgpuPipelineLayoutRelease(pipelineLayout);
+			wgpuBindGroupLayoutRelease(bindGroupLayout);
+			arena.close();
+		}
+	}
+
 	private final WebGPUContext ctx;
-	/** Holds every descriptor Dawn keeps a pointer into: shader source, layouts, pipeline specs. */
+	private final Shared shared;
+	/** Holds every descriptor Dawn keeps a pointer into for this cache's pipelines. */
 	private final Arena arena;
 	private final Map<Long, MemorySegment> cache = new HashMap<>();
-	private final MemorySegment[] shaders;
-	private final MemorySegment bindGroupLayout;
-	private final MemorySegment pipelineLayout;
 	private final int colorFormat;
+	private final int[] auxFormats;
 	private final int depthFormat;
+	private final boolean depthOnly;
 	private final boolean compactTerrain;
+	private final String label;
 	private int built;
 
-	private FixedFunctionPipelines(WebGPUContext ctx, Arena arena, MemorySegment[] shaders,
-			MemorySegment bindGroupLayout, MemorySegment pipelineLayout,
-			int colorFormat, int depthFormat, boolean compactTerrain) {
+	private FixedFunctionPipelines(WebGPUContext ctx, Shared shared, Arena arena, String label,
+			int colorFormat, int[] auxFormats, int depthFormat, boolean depthOnly,
+			boolean compactTerrain) {
 		this.ctx = ctx;
+		this.shared = shared;
 		this.arena = arena;
-		this.shaders = shaders;
-		this.bindGroupLayout = bindGroupLayout;
-		this.pipelineLayout = pipelineLayout;
+		this.label = label;
 		this.colorFormat = colorFormat;
+		this.auxFormats = auxFormats;
 		this.depthFormat = depthFormat;
+		this.depthOnly = depthOnly;
 		this.compactTerrain = compactTerrain;
 	}
 
 	/**
 	 * @param depthFormat 0 for a colour-only target; must otherwise match the pass's depth attachment
 	 */
+	public static FixedFunctionPipelines create(WebGPUContext ctx, Shared shared,
+			int colorFormat, int depthFormat) {
+		return create(ctx, shared, "swapchain", colorFormat, NO_AUX, depthFormat, false,
+			TerrainVertex.compact());
+	}
+
+	private static final int[] NO_AUX = new int[0];
+
+	/**
+	 * A standalone cache that owns its shader modules, for a caller with only one target layout.
+	 *
+	 * <p>The headless tests and benches, which stand a whole renderer up and tear it down inside one
+	 * method. The real frame loop passes a {@link Shared} instead, because it holds three caches and
+	 * they must not each compile the same shaders.
+	 */
 	public static FixedFunctionPipelines create(WebGPUContext ctx, int colorFormat, int depthFormat) {
 		return create(ctx, colorFormat, depthFormat, TerrainVertex.compact());
 	}
+
+	public static FixedFunctionPipelines create(WebGPUContext ctx, int colorFormat, int depthFormat,
+			boolean compactTerrain) {
+		Shared shared = Shared.create(ctx);
+		FixedFunctionPipelines pipelines = create(ctx, shared, "standalone", colorFormat, NO_AUX,
+			depthFormat, false, compactTerrain);
+		pipelines.ownedShared = shared;
+		return pipelines;
+	}
+
+	/** Set only by the standalone factory; closed with this cache. */
+	private Shared ownedShared;
 
 	/**
 	 * The terrain layout is normally whatever {@link TerrainVertex#COMPACT} says, because the mesher
@@ -110,33 +254,16 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	 * stand both layouts up in one process and measure them against each other, which is the only
 	 * way the comparison is worth anything.
 	 */
-	public static FixedFunctionPipelines create(WebGPUContext ctx, int colorFormat, int depthFormat,
+	public static FixedFunctionPipelines create(WebGPUContext ctx, Shared shared, String label,
+			int colorFormat, int[] auxFormats, int depthFormat, boolean depthOnly,
 			boolean compactTerrain) {
-		Arena arena = Arena.ofShared();
-		try {
-			MemorySegment[] shaders = new MemorySegment[SHADER_PATHS.length];
-			for (int program = 0; program < SHADER_PATHS.length; program++) {
-				shaders[program] = Shaders.compile(ctx, arena,
-					SHADER_PATHS[program], program(program));
-				if (shaders[program].equals(MemorySegment.NULL)) {
-					throw new IllegalStateException(SHADER_PATHS[program] + " failed to compile");
-				}
-			}
-			MemorySegment bindGroupLayout =
-				Bindings.fixedFunctionLayout(ctx, arena, GlState.UNIFORM_BYTES);
-			MemorySegment pipelineLayout =
-				Bindings.pipelineLayout(ctx, arena, "retrodragon-fixedfunc", bindGroupLayout);
-			return new FixedFunctionPipelines(ctx, arena, shaders, bindGroupLayout, pipelineLayout,
-				colorFormat, depthFormat, compactTerrain);
-		} catch (RuntimeException e) {
-			arena.close();
-			throw e;
-		}
+		return new FixedFunctionPipelines(ctx, shared, Arena.ofShared(), label, colorFormat,
+			auxFormats == null ? NO_AUX : auxFormats, depthFormat, depthOnly, compactTerrain);
 	}
 
 	/**
-	 * The WGSL for one program, which for the opaque terrain variant is the terrain source with the
-	 * alpha-test region cut out.
+	 * The WGSL for a built-in program, which for the opaque terrain variant is the terrain source
+	 * with the alpha-test region cut out.
 	 *
 	 * <p>Textual, and deliberately so: the point is that the compiled shader must not CONTAIN a
 	 * {@code discard}, because that is what makes a driver give up early depth testing. A uniform
@@ -145,7 +272,7 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	 * <p>Throws if the markers are missing rather than silently compiling a second identical shader,
 	 * which would look like the optimisation was measured and found worthless.
 	 */
-	private static String program(int index) {
+	private static String builtIn(int index) {
 		String source = source(SHADER_PATHS[index]);
 		if (index != PipelineKey.PROGRAM_TERRAIN_OPAQUE) {
 			return source;
@@ -186,13 +313,23 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	}
 
 	private MemorySegment build(long key) {
-		int program = Math.min(PipelineKey.program(key), shaders.length - 1);
-		// Both terrain programs read the same buffers, so both take the terrain vertex layout.
-		boolean terrain = program == PipelineKey.PROGRAM_TERRAIN
-			|| program == PipelineKey.PROGRAM_TERRAIN_OPAQUE;
-		PipelineSpec spec = new PipelineSpec()
-			.label((terrain ? "terrain-" : "fixedfunc-") + Long.toHexString(key))
-			.shader(shaders[program])
+		int program = PipelineKey.program(key);
+		if (program >= ShaderApi.programCount()) {
+			// A stale key from a program that no longer exists -- an extension removed mid-session.
+			// Falling back is better than failing the frame, and it is visibly wrong rather than
+			// silently so.
+			program = PipelineKey.PROGRAM_FIXED_FUNCTION;
+			key = PipelineKey.withProgram(key, program);
+		}
+		ProgramSpec spec = ShaderApi.program(program);
+		boolean terrain = spec == null
+			? program == PipelineKey.PROGRAM_TERRAIN || program == PipelineKey.PROGRAM_TERRAIN_OPAQUE
+			: spec.layout() == ProgramSpec.VertexLayout.TERRAIN;
+		String name = spec == null ? (terrain ? "terrain" : "fixedfunc") : spec.name();
+
+		PipelineSpec pipeline = new PipelineSpec()
+			.label(label + "-" + name + "-" + Long.toHexString(key))
+			.shader(shared.shader(program))
 			// Terrain is the one program whose vertices this project packs itself, so it is the one
 			// that can afford a layout narrower than beta's. Everything else reads bytes the
 			// Tessellator wrote and must describe them exactly as they are.
@@ -201,29 +338,38 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 				terrain
 					? (compactTerrain ? TERRAIN_COMPACT_ATTRIBUTES : TERRAIN_LEGACY_ATTRIBUTES)
 					: VERTEX_ATTRIBUTES)
-			.color(colorFormat)
-			.layout(pipelineLayout);
+			.layout(shared.layoutFor(program));
 
-		spec.topology = topology(PipelineKey.topology(key));
-		spec.cullMode = cull(PipelineKey.cull(key));
-		spec.blend = PipelineKey.blend(key);
-		if (spec.blend) {
-			spec.blendSrcColor = blendFactor(PipelineKey.blendSrc(key));
-			spec.blendDstColor = blendFactor(PipelineKey.blendDst(key));
+		if (depthOnly) {
+			pipeline.depthOnly();
+		} else {
+			// A program declaring fewer aux outputs than the pass provides is fine -- WebGPU allows a
+			// fragment stage to leave later attachments unwritten -- but declaring MORE is not, so the
+			// pipeline gets the program's own count rather than the target's.
+			int aux = spec == null ? 0 : Math.min(spec.auxTargets(), auxFormats.length);
+			pipeline.color(colorFormat, aux == 0 ? NO_AUX : java.util.Arrays.copyOf(auxFormats, aux));
+		}
+
+		pipeline.topology = topology(PipelineKey.topology(key));
+		pipeline.cullMode = cull(PipelineKey.cull(key));
+		pipeline.blend = PipelineKey.blend(key);
+		if (pipeline.blend) {
+			pipeline.blendSrcColor = blendFactor(PipelineKey.blendSrc(key));
+			pipeline.blendDstColor = blendFactor(PipelineKey.blendDst(key));
 			// Alpha uses the same factors GL would: beta never calls glBlendFuncSeparate, so the
 			// separate-alpha path exists only to keep the destination alpha sane on a surface that
 			// has one.
-			spec.blendSrcAlpha = spec.blendSrcColor;
-			spec.blendDstAlpha = spec.blendDstColor;
+			pipeline.blendSrcAlpha = pipeline.blendSrcColor;
+			pipeline.blendDstAlpha = pipeline.blendDstColor;
 		}
 		if (depthFormat != 0) {
-			spec.depth(depthFormat, PipelineKey.depthTest(key), PipelineKey.depthWrite(key),
+			pipeline.depth(depthFormat, PipelineKey.depthTest(key), PipelineKey.depthWrite(key),
 				compare(PipelineKey.depthFunc(key)));
 			// glPolygonOffset. Negative in beta's only use, which pulls the block-breaking overlay
 			// TOWARDS the viewer so it wins the depth compare against the face it sits on.
-			spec.polygonOffset(PipelineKey.offsetUnits(key), PipelineKey.offsetSlope(key));
+			pipeline.polygonOffset(PipelineKey.offsetUnits(key), PipelineKey.offsetSlope(key));
 		}
-		return Pipelines.create(ctx, arena, spec);
+		return Pipelines.create(ctx, arena, pipeline);
 	}
 
 	// --- shim's dense indices to WebGPU enums ----------------------------------------------------
@@ -291,7 +437,7 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	}
 
 	public MemorySegment bindGroupLayout() {
-		return bindGroupLayout;
+		return shared.bindGroupLayout();
 	}
 
 	public int colorFormat() {
@@ -313,13 +459,10 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 			wgpuRenderPipelineRelease(pipeline);
 		}
 		cache.clear();
-		if (!pipelineLayout.equals(MemorySegment.NULL)) wgpuPipelineLayoutRelease(pipelineLayout);
-		if (!bindGroupLayout.equals(MemorySegment.NULL)) wgpuBindGroupLayoutRelease(bindGroupLayout);
-		for (MemorySegment shader : shaders) {
-			if (shader != null && !shader.equals(MemorySegment.NULL)) {
-				wgpuShaderModuleRelease(shader);
-			}
-		}
 		arena.close();
+		if (ownedShared != null) {
+			ownedShared.close();
+			ownedShared = null;
+		}
 	}
 }

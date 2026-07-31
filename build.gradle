@@ -6,6 +6,10 @@ plugins {
 	id 'ploceus' version '1.16.1'
 	// Also builds a babric variant (build/libs/<name>-babric.jar).
 	id 'com.periut.retroconvert' version "${retroconvert_version}"
+	// So `./gradlew publishToMavenLocal` puts this build's jar where a companion mod -- RetroShader,
+	// or anything else built against the shader API -- resolves it. Without it the companion can only
+	// ever compile against the last RELEASED engine, which is exactly wrong while the API is moving.
+	id 'maven-publish'
 }
 
 base {
@@ -631,6 +635,17 @@ tasks.register('smokeTest', JavaExec) {
 	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
 }
 
+// The compute half of the same bring-up: a dispatch whose result is read back and compared, so a
+// pass that quietly produced nothing cannot pass. See ComputeCheck for what each stage proves.
+tasks.register('computeCheck', JavaExec) {
+	group = 'verification'
+	description = 'Dispatches compute into 3D and 2D storage textures and asserts the values read back.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.gpu.ComputeCheck'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
+}
+
 tasks.register('webgpuStress', JavaExec) {
 	group = 'verification'
 	description = 'Drives the frame shapes a world load produces, offscreen, and requires a clean device.'
@@ -717,4 +732,40 @@ tasks.named('check') {
 }
 tasks.named('verifyNoStubsInJar') {
 	dependsOn tasks.named('assemble')
+}
+
+// ---------------------------------------------------------------------------------------------
+// Publishing, for companion mods built against the shader API.
+//
+// The REMAPPED jar, not the raw one: a consumer's Loom remaps a mod dependency from intermediary
+// into its own mappings, and the raw jar carries named ones. Publishing that instead produces a
+// dependency that compiles and then cannot find a single method at runtime.
+// ---------------------------------------------------------------------------------------------
+publishing {
+	publications {
+		mod(MavenPublication) {
+			groupId = project.maven_group
+			artifactId = project.archives_base_name
+			version = project.version
+			artifact(tasks.named('remapJar'))
+			artifact(tasks.named('sourcesJar')) {
+				classifier = 'sources'
+			}
+		}
+	}
+	repositories {
+		mavenLocal()
+	}
+}
+
+// Compiles a directory of WGSL against a real device -- the offline half of a shader check. A
+// companion mod dumps its assembled programs and points this at them; see WgslCheck.
+tasks.register('wgslCheck', JavaExec) {
+	group = 'verification'
+	description = 'Compiles every .wgsl in -Pdir=<directory> against a headless Dawn device.'
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = 'com.periut.retrodragon.gpu.WgslCheck'
+	jvmArgs '--enable-native-access=ALL-UNNAMED'
+	args = [project.findProperty('dir') ?: 'build/wgsl']
+	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
 }

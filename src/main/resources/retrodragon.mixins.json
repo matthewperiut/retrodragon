@@ -25,7 +25,13 @@
     "GlOwnershipMixin",
     "TextRendererMixin",
     "MinecraftAccessor",
-    "FrameTimerMixin"
+    "FrameTimerMixin",
+    "WorldRendererPhaseMixin",
+    "GameRendererPhaseMixin",
+    "EntityRendererPhaseMixin",
+    "ParticleManagerPhaseMixin",
+    "HudPhaseMixin",
+    "ScreenPhaseMixin"
   ],
   "server": [],
   "injectors": {

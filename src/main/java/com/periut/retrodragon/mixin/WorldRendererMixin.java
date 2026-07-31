@@ -58,6 +58,12 @@ public abstract class WorldRendererMixin {
 		double camY = camera.lastTickY + (camera.y - camera.lastTickY) * tickDelta;
 		double camZ = camera.lastTickZ + (camera.z - camera.lastTickZ) * tickDelta;
 
+		// Immediately before the draw, in the same callback -- see WorldRendererPhaseMixin for why it
+		// cannot live in a second injection at this same point.
+		com.periut.retrodragon.api.ShaderApi.setPhase(layer == 0
+			? com.periut.retrodragon.api.DrawPhase.TERRAIN_OPAQUE
+			: com.periut.retrodragon.api.DrawPhase.TERRAIN_TRANSLUCENT);
+		com.periut.retrodragon.render.WebGpuFrame.notifyWorldFrame((float) tickDelta);
 		cir.setReturnValue(SectionDrawer.draw(this.sortedChunks, from, to, layer, this.occlusion, camX, camY, camZ));
 	}
 
@@ -104,6 +110,9 @@ public abstract class WorldRendererMixin {
 			return;
 		}
 		ci.cancel();
+		com.periut.retrodragon.api.ShaderApi.setPhase(layer == 0
+			? com.periut.retrodragon.api.DrawPhase.TERRAIN_OPAQUE
+			: com.periut.retrodragon.api.DrawPhase.TERRAIN_TRANSLUCENT);
 		SectionDrawer.replayLast();
 	}
 }

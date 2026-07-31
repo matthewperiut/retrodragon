@@ -34,7 +34,17 @@ public final class PipelineKey {
 	private static final int OFFSET_BITS = 6;
 
 	private static final int TOPOLOGY_BITS = 3;
-	private static final int PROGRAM_BITS = 4;
+	/**
+	 * Six, not four. The three built-in programs left eleven spare slots, which was ample while the
+	 * engine owned every shader -- but a shader mod registers a program per draw family (sky, sunset
+	 * fan, sun, moon, clouds, weather, entities, particles, hand, water, damaged block, spider eyes,
+	 * shadow casters, plus its own terrain pair), and two mods coexisting doubles that. Sixty-four
+	 * costs two bits of a long that has 27 to spare and removes the ceiling as a design concern.
+	 */
+	private static final int PROGRAM_BITS = 6;
+
+	/** How many distinct programs a key can address; see {@link #PROGRAM_BITS}. */
+	public static final int MAX_PROGRAMS = 1 << PROGRAM_BITS;
 
 	/**
 	 * Which shader the draw uses. Part of the key because a pipeline bakes in its shader module, so
@@ -97,29 +107,39 @@ public final class PipelineKey {
 			boolean depthTest, boolean blend, int cull, int topology, int program,
 			int offsetUnits, int offsetSlope) {
 		long key = 0L;
-		int shift = 0;
-		key |= mask(blendSrc, BLEND_SRC_BITS) << shift;
-		shift += BLEND_SRC_BITS;
-		key |= mask(blendDst, BLEND_DST_BITS) << shift;
-		shift += BLEND_DST_BITS;
-		key |= mask(depthFunc, DEPTH_FUNC_BITS) << shift;
-		shift += DEPTH_FUNC_BITS;
-		key |= mask(cull, CULL_BITS) << shift;
-		shift += CULL_BITS;
-		key |= mask(topology, TOPOLOGY_BITS) << shift;
-		shift += TOPOLOGY_BITS;
-		key |= mask(program, PROGRAM_BITS) << shift;
-		shift += PROGRAM_BITS;
-		key |= (depthWrite ? 1L : 0L) << shift++;
-		key |= (depthTest ? 1L : 0L) << shift++;
-		key |= (blend ? 1L : 0L) << shift++;
+		key |= mask(blendSrc, BLEND_SRC_BITS) << BLEND_SRC_SHIFT;
+		key |= mask(blendDst, BLEND_DST_BITS) << BLEND_DST_SHIFT;
+		key |= mask(depthFunc, DEPTH_FUNC_BITS) << DEPTH_FUNC_SHIFT;
+		key |= mask(cull, CULL_BITS) << CULL_SHIFT;
+		key |= mask(topology, TOPOLOGY_BITS) << TOPOLOGY_SHIFT;
+		key |= mask(program, PROGRAM_BITS) << PROGRAM_SHIFT;
+		key |= (depthWrite ? 1L : 0L) << DEPTH_WRITE_SHIFT;
+		key |= (depthTest ? 1L : 0L) << DEPTH_TEST_SHIFT;
+		key |= (blend ? 1L : 0L) << BLEND_SHIFT;
 		// Depth bias is PIPELINE state in WebGPU, not a call like glPolygonOffset, so it has to be
 		// part of the key or two draws that differ only by offset would share one pipeline.
-		key |= mask(offsetUnits, OFFSET_BITS) << shift;
-		shift += OFFSET_BITS;
-		key |= mask(offsetSlope, OFFSET_BITS) << shift;
+		key |= mask(offsetUnits, OFFSET_BITS) << OFFSET_UNITS_SHIFT;
+		key |= mask(offsetSlope, OFFSET_BITS) << OFFSET_SLOPE_SHIFT;
 		return key;
 	}
+
+	// Field positions, derived from the widths rather than written out.
+	//
+	// They used to be spelled as literals in the accessors while `of` walked a running shift, so the
+	// two descriptions of the layout could disagree -- and widening PROGRAM_BITS is exactly the edit
+	// that makes them disagree silently: every accessor above the program field would read the
+	// neighbouring field's bits, and a key would decode as a different pipeline rather than fail.
+	private static final int BLEND_SRC_SHIFT = 0;
+	private static final int BLEND_DST_SHIFT = BLEND_SRC_SHIFT + BLEND_SRC_BITS;
+	private static final int DEPTH_FUNC_SHIFT = BLEND_DST_SHIFT + BLEND_DST_BITS;
+	private static final int CULL_SHIFT = DEPTH_FUNC_SHIFT + DEPTH_FUNC_BITS;
+	private static final int TOPOLOGY_SHIFT = CULL_SHIFT + CULL_BITS;
+	private static final int PROGRAM_SHIFT = TOPOLOGY_SHIFT + TOPOLOGY_BITS;
+	private static final int DEPTH_WRITE_SHIFT = PROGRAM_SHIFT + PROGRAM_BITS;
+	private static final int DEPTH_TEST_SHIFT = DEPTH_WRITE_SHIFT + 1;
+	private static final int BLEND_SHIFT = DEPTH_TEST_SHIFT + 1;
+	private static final int OFFSET_UNITS_SHIFT = BLEND_SHIFT + 1;
+	private static final int OFFSET_SLOPE_SHIFT = OFFSET_UNITS_SHIFT + OFFSET_BITS;
 
 	/** Sign-extends a field packed by {@link #mask}. */
 	private static int signed(long key, int shift, int bits) {
@@ -132,48 +152,89 @@ public final class PipelineKey {
 		return value & (1L << bits) - 1L;
 	}
 
+	private static int field(long key, int shift, int bits) {
+		return (int) (key >>> shift & (1L << bits) - 1L);
+	}
+
 	public static int blendSrc(long key) {
-		return (int) (key & 0xF);
+		return field(key, BLEND_SRC_SHIFT, BLEND_SRC_BITS);
 	}
 
 	public static int blendDst(long key) {
-		return (int) (key >>> 4 & 0xF);
+		return field(key, BLEND_DST_SHIFT, BLEND_DST_BITS);
 	}
 
 	public static int depthFunc(long key) {
-		return (int) (key >>> 8 & 0x7);
+		return field(key, DEPTH_FUNC_SHIFT, DEPTH_FUNC_BITS);
 	}
 
 	public static int cull(long key) {
-		return (int) (key >>> 11 & 0x3);
+		return field(key, CULL_SHIFT, CULL_BITS);
 	}
 
 	public static int topology(long key) {
-		return (int) (key >>> 13 & 0x7);
+		return field(key, TOPOLOGY_SHIFT, TOPOLOGY_BITS);
 	}
 
 	public static int program(long key) {
-		return (int) (key >>> 16 & 0xF);
+		return field(key, PROGRAM_SHIFT, PROGRAM_BITS);
 	}
 
+	/** The same key with a different program -- what a shadow or deferred replay needs. */
+	public static long withProgram(long key, int program) {
+		long cleared = key & ~(((1L << PROGRAM_BITS) - 1L) << PROGRAM_SHIFT);
+		return cleared | mask(program, PROGRAM_BITS) << PROGRAM_SHIFT;
+	}
+
+	/**
+	 * The key a batch is re-drawn under when it is replayed into a shadow map.
+	 *
+	 * <p>Keeps only what describes the GEOMETRY -- topology, and the vertex layout implied by the
+	 * program -- and forces everything about how it lands in the framebuffer:
+	 *
+	 * <ul>
+	 * <li>Depth test and write ON with {@code LESS_EQUAL}. A batch captured with depth writes off
+	 *     (any translucent draw) would contribute nothing to a depth-only pass, so its caster would
+	 *     silently vanish from the map.</li>
+	 * <li>Blending OFF. There is no colour attachment to blend into, and a blend state on a
+	 *     depth-only pipeline is a validation error rather than a no-op.</li>
+	 * <li>Culling OFF. The light sees the faces the camera culls; a shadow map built with the
+	 *     camera's back-face culling is hollow, and the light leaks through every wall.</li>
+	 * <li>No depth bias. The offset that lifts the block-breaking overlay off its face has nothing
+	 *     to do with the shadow map, and a pack's own bias belongs in its shader where it can be
+	 *     normal-aware.</li>
+	 * </ul>
+	 *
+	 * <p>Collapsing all of that is also what keeps the shadow cache small: the whole world's worth of
+	 * captured states reduces to one pipeline per topology.
+	 */
+	public static long forShadow(long key, int program) {
+		return of(GL_BLEND_ZERO_DENSE, GL_BLEND_ZERO_DENSE, DEPTH_LEQUAL_DENSE, true, true, false,
+			CULL_NONE, topology(key), program);
+	}
+
+	// Spelled out here rather than referenced from GlShim, which depends on this class.
+	private static final int GL_BLEND_ZERO_DENSE = 0;
+	private static final int DEPTH_LEQUAL_DENSE = 3;
+
 	public static boolean depthWrite(long key) {
-		return (key >>> 20 & 1L) != 0L;
+		return (key >>> DEPTH_WRITE_SHIFT & 1L) != 0L;
 	}
 
 	public static boolean depthTest(long key) {
-		return (key >>> 21 & 1L) != 0L;
+		return (key >>> DEPTH_TEST_SHIFT & 1L) != 0L;
 	}
 
 	public static boolean blend(long key) {
-		return (key >>> 22 & 1L) != 0L;
+		return (key >>> BLEND_SHIFT & 1L) != 0L;
 	}
 
 	public static int offsetUnits(long key) {
-		return signed(key, 23, OFFSET_BITS);
+		return signed(key, OFFSET_UNITS_SHIFT, OFFSET_BITS);
 	}
 
 	public static int offsetSlope(long key) {
-		return signed(key, 23 + OFFSET_BITS, OFFSET_BITS);
+		return signed(key, OFFSET_SLOPE_SHIFT, OFFSET_BITS);
 	}
 
 	/** {@code java com.periut.retrodragon.shim.PipelineKey} */
@@ -205,9 +266,23 @@ public final class PipelineKey {
 			"depthWrite/depthTest must not collide");
 
 		// Maximum field values still fit without overflow into the next field.
-		long full = of(15, 15, 7, true, true, true, 3, 7, 15);
+		long full = of(15, 15, 7, true, true, true, 3, 7, MAX_PROGRAMS - 1);
 		check(blendSrc(full) == 15 && blendDst(full) == 15 && depthFunc(full) == 7
-			&& cull(full) == 3 && topology(full) == 7 && program(full) == 15, "max values fit");
+			&& cull(full) == 3 && topology(full) == 7 && program(full) == MAX_PROGRAMS - 1,
+			"max values fit");
+
+		// withProgram swaps ONLY the program. A shadow replay reuses each batch's key with the
+		// caster program substituted, so anything else it disturbed would silently change the
+		// blend or depth state the map is rendered with.
+		long swapped = withProgram(key, MAX_PROGRAMS - 1);
+		check(program(swapped) == MAX_PROGRAMS - 1, "withProgram sets the program");
+		check(withProgram(swapped, program(key)) == key, "withProgram round-trips");
+		check(blendSrc(swapped) == blendSrc(key) && blendDst(swapped) == blendDst(key)
+			&& depthFunc(swapped) == depthFunc(key) && cull(swapped) == cull(key)
+			&& topology(swapped) == topology(key) && depthWrite(swapped) == depthWrite(key)
+			&& depthTest(swapped) == depthTest(key) && blend(swapped) == blend(key)
+			&& offsetUnits(swapped) == offsetUnits(key) && offsetSlope(swapped) == offsetSlope(key),
+			"withProgram must not disturb any other field");
 
 		// glPolygonOffset. Signed, because beta's only use is negative -- an unsigned field would
 		// read -3 back as 61 and push the block-breaking overlay AWAY from the viewer, making the
