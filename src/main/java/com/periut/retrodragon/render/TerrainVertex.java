@@ -119,12 +119,50 @@ public final class TerrainVertex {
 	/**
 	 * Packs a texture coordinate axis into unorm16.
 	 *
+	 * <p>Scaled by 65536, NOT by 65535, even though the hardware decodes a unorm16 as {@code p/65535}.
+	 * The two do not have to agree, and making them disagree is what makes a TILE BOUNDARY exact.
+	 *
+	 * <p>Every terrain coordinate beta emits is a multiple of {@code 1/256} -- a tile edge is
+	 * {@code k/16} -- and no multiple of {@code 1/256} is representable as {@code p/65535}. Rounding
+	 * to the nearest one moves the coordinate off the boundary by up to half a step, and which SIDE
+	 * it lands on depends on {@code k}: {@code 13/16} packs to 53247, which decodes to 0.8124971 --
+	 * a hair BELOW the boundary, so the terrain program's {@code floor(uv / tileSize)} reads the
+	 * outermost sliver of that tile as belonging to the PREVIOUS one and samples a neighbouring
+	 * texture. Beta's still-water tile is 13 across and 12 down, and every tile around it is the
+	 * unused magenta placeholder, so on water the slip shows as bright specks along the -X and -Z
+	 * edge of each surface quad; elsewhere it lands on another block texture and mostly hides.
+	 *
+	 * <p>Scaling by 65536 makes every {@code k/65536} -- so every {@code k/256} and every tile edge --
+	 * land on an integer, which the decode then reproduces as exactly {@code p * 65536/65535}: a
+	 * clean SCALE of the whole atlas rather than a per-coordinate rounding error. A scale is
+	 * something the shader can be told about, and {@link #shaderAtlasTexels} is where it is told.
+	 * 65536 itself is the only value that cannot be encoded; {@code uv == 1} clamps to 65535 and
+	 * lands 1/256 of a texel short of the sheet's edge, which no fragment can reach.
+	 *
 	 * <p>Clamped rather than wrapped. A terrain coordinate outside 0..1 is not a tiling request --
 	 * the atlas has no meaningful texel there -- so the honest reproduction of what the sampler
 	 * would have done with a clamped address is to clamp here, where it costs nothing.
 	 */
 	public static int packUv(float uv) {
-		int packed = Math.round(uv * 65535.0F);
+		int packed = Math.round(uv * 65536.0F);
 		return packed < 0 ? 0 : Math.min(packed, 65535);
+	}
+
+	/**
+	 * The atlas width the terrain program must be told, given how this layout's UVs decode.
+	 *
+	 * <p>{@link #packUv} leaves a compact coordinate scaled by {@code 65536/65535}, so the shader
+	 * sees a sheet that is fractionally LARGER than the real one. Shrinking the texel count it is
+	 * given by the same factor puts every quantity it derives -- the tile size, the tile origin, the
+	 * per-mip inset, the tap footprint -- back into the coordinate space the vertices actually
+	 * arrive in. Nothing else has to change, and the sampler still addresses the real sheet: the
+	 * clamp keeps the tap half a texel inside its tile, which the residual 1/256 of a texel cannot
+	 * push out.
+	 *
+	 * <p>The legacy layout stores the coordinate as a float and needs no correction, which is why
+	 * this is a function of the layout rather than a constant folded into the shader.
+	 */
+	public static float shaderAtlasTexels(float texels) {
+		return compact() ? texels * (65535.0F / 65536.0F) : texels;
 	}
 }

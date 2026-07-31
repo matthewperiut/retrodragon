@@ -3,7 +3,7 @@
 	"id": "retrodragon",
 	"version": "${version}",
 	"name": "RetroDragon",
-	"description": "Rebuilds Minecraft Beta 1.7.3's client stack: SDL3 windowing, input and context in place of LWJGL 2, a faster rendering backend with an optional WebGPU (Dawn) path, and native window/titlebar theming.",
+	"description": "Rebuilds Minecraft Beta 1.7.3's client stack: SDL3 windowing, input and context in place of LWJGL 2, a faster rendering backend with a choice of WebGPU (Dawn) path or OGL 4.6<->2.1 depending on compatability, and native window/titlebar theming.",
 	"authors": [
 		"Slainlight"
 	],

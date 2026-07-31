@@ -41,9 +41,14 @@ public final class TerrainAppearance {
 	 * The atlas's edge length in texels. 256 for vanilla, larger for an HD pack or once RetroAPI has
 	 * grown it; the shader derives its per-mip texel inset from this, so a wrong value bleeds
 	 * neighbouring tiles.
+	 *
+	 * <p>Corrected for the terrain layout's texture-coordinate encoding -- see
+	 * {@link TerrainVertex#shaderAtlasTexels}. Without that the compact layout's tile edges land a
+	 * fraction of a texel on the wrong side of the boundary and the outermost sliver of a tile
+	 * samples its neighbour.
 	 */
 	public static float atlasTexels() {
-		return BlockAtlas.texels();
+		return TerrainVertex.shaderAtlasTexels(BlockAtlas.texels());
 	}
 
 	/** The grid pitch in texels, or 0 when the atlas is stitched and has no grid. */

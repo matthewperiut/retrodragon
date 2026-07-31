@@ -277,6 +277,7 @@ public final class VertexSink {
 
 		failures += checkQuadMode();
 		failures += checkCompactPacking();
+		failures += checkTileBoundaries();
 
 		if (failures > 0) {
 			System.out.println("VertexSink self-check FAILED (" + failures + ")");
@@ -310,6 +311,54 @@ public final class VertexSink {
 			return 0;
 		} finally {
 			QuadVertices.select(false);
+		}
+	}
+
+	/**
+	 * A packed tile edge still reads as its OWN tile once the shader divides it up.
+	 *
+	 * <p>The one property the whole compact texture coordinate rests on, and the one that was
+	 * quietly false: {@code terrain.wgsl} picks a tile with {@code floor(uv / tileSize)}, so a tile
+	 * edge that decodes even a fraction below the boundary puts the outermost sliver of that tile in
+	 * the previous one and samples a neighbouring texture. On beta's water -- tile 13 across, 12
+	 * down, magenta placeholder on every side -- that is a white speck along the edge of a surface
+	 * quad, appearing only when a pixel centre happens to land in a band 4e-5 of a block wide.
+	 *
+	 * <p>Checked at the boundary itself rather than at some chosen distance inside it, because the
+	 * boundary is the worst case and a fragment is always strictly inside one. Both atlas shapes
+	 * that exist: vanilla's 256 sheet and a 512 one, where the tile is a different fraction of it.
+	 */
+	private static int checkTileBoundaries() {
+		TerrainVertex.select(true);
+		try {
+			if (!TerrainVertex.compact()) {
+				System.out.println("VertexSink tile boundaries SKIPPED"
+					+ " (-Dretroperf.compactTerrain=false)");
+				return 0;
+			}
+			int failures = 0;
+			for (int texels : new int[] { 256, 512 }) {
+				float tileSize = 16.0F / TerrainVertex.shaderAtlasTexels(texels);
+				for (int tile = 0; tile < texels / 16; tile++) {
+					float exact = tile * 16.0F / texels;
+					// Exactly what a Unorm16x2 attribute delivers, and what the shader does with it.
+					float decoded = TerrainVertex.packUv(exact) / 65535.0F;
+					int got = (int) Math.floor(decoded / tileSize);
+					if (got != tile) {
+						System.out.println("FAIL: on a " + texels + " atlas the edge of tile " + tile
+							+ " (" + exact + ") decodes to " + decoded + ", which the shader reads"
+							+ " as tile " + got);
+						failures++;
+					}
+				}
+			}
+			if (failures == 0) {
+				System.out.println("VertexSink tile boundaries OK: every tile edge decodes into its"
+					+ " own tile on a 256 and a 512 atlas");
+			}
+			return failures;
+		} finally {
+			TerrainVertex.select(false);
 		}
 	}
 
