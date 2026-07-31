@@ -32,3 +32,6 @@ workspace/
 
 # macOS
 *.DS_Store
+
+# Game logs. The dev runs write here as well as into run/, and these were tracked by accident.
+logs/
