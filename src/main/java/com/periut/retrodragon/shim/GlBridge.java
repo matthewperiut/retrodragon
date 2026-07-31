@@ -303,15 +303,56 @@ public final class GlBridge {
 		WebGpuFrame.textures().delete(name);
 	}
 
+	/**
+	 * Whatever the caller's pixels are, in whatever layout, as the RGBA8 the store takes.
+	 *
+	 * <p>{@code format}, {@code type} and the unpack state used to be dropped on the floor, on the
+	 * true-but-narrow reasoning that beta only ever uploads tightly packed RGBA bytes. StationAPI
+	 * uploads neither: see {@link PixelStore}.
+	 */
 	public static void glTexImage2D(int target, int level, int internalFormat, int width, int height,
 			int border, int format, int type, ByteBuffer pixels) {
+		texImage(target, level, width, height, PixelStore.rgba(format, type, width, height, pixels));
+	}
+
+	/**
+	 * The {@code IntBuffer} spelling, and the one the reported atlas bug was.
+	 *
+	 * <p>{@code GlPlugin} matches by name AND descriptor, so this overload's absence did not fall back
+	 * to the {@code ByteBuffer} one -- it became an empty method body. StationAPI allocates every
+	 * texture it owns through {@code TextureUtil.prepareImage}, which calls exactly this, so its
+	 * stitched block atlas was never created at all: every later {@code glTexSubImage2D} of a sprite
+	 * found no texture under that name, and the store's 1x1 white stand-in was drawn instead. Hence
+	 * white blocks, with grass and leaves green from the biome tint the vertex colour still carried.
+	 */
+	public static void glTexImage2D(int target, int level, int internalFormat, int width, int height,
+			int border, int format, int type, IntBuffer pixels) {
+		texImage(target, level, width, height, PixelStore.rgba(format, type, width, height, pixels));
+	}
+
+	private static void texImage(int target, int level, int width, int height, ByteBuffer rgba) {
+		if (target == GL_PROXY_TEXTURE_2D) {
+			// Not an upload: a capability probe. StationAPI sizes its stitched atlas by asking for a
+			// 32768-square proxy and halving until one is accepted, reading the answer back with
+			// glGetTexLevelParameteri -- so answer from the device's real limit and allocate nothing.
+			int max = maxTextureSize();
+			boolean fits = width <= max && height <= max;
+			proxyWidth = fits ? width : 0;
+			proxyHeight = fits ? height : 0;
+			return;
+		}
+		if (target != GL_TEXTURE_2D) {
+			// 1D, 3D and the cube map faces. Nothing in beta or either content API uses them, and
+			// treating one as a 2D upload would put the wrong image under the bound name.
+			return;
+		}
 		int name = shim().boundTexture();
 		if (level == 0) {
-			WebGpuFrame.textures().define(name, width, height, pixels);
+			WebGpuFrame.textures().define(name, width, height, rgba);
 			// A replaced texture leaves the cached bind group holding a view of the old one.
 			WebGpuFrame.immediate().invalidate(name);
 		} else {
-			WebGpuFrame.textures().defineLevel(name, level, width, height, pixels);
+			WebGpuFrame.textures().defineLevel(name, level, width, height, rgba);
 		}
 	}
 
@@ -325,14 +366,100 @@ public final class GlBridge {
 	 */
 	public static void glTexSubImage2D(int target, int level, int x, int y, int width, int height,
 			int format, int type, ByteBuffer pixels) {
+		texSubImage(target, level, x, y, width, height,
+			PixelStore.rgba(format, type, width, height, pixels));
+	}
+
+	/**
+	 * The {@code IntBuffer} spelling. beta's own LWJGL3 compat {@code TextureUtil} uploads through
+	 * this one, in {@code GL_BGRA} rows of ARGB ints.
+	 */
+	public static void glTexSubImage2D(int target, int level, int x, int y, int width, int height,
+			int format, int type, IntBuffer pixels) {
+		texSubImage(target, level, x, y, width, height,
+			PixelStore.rgba(format, type, width, height, pixels));
+	}
+
+	private static void texSubImage(int target, int level, int x, int y, int width, int height,
+			ByteBuffer rgba) {
+		if (target != GL_TEXTURE_2D || rgba == null) {
+			return;
+		}
 		int name = shim().boundTexture();
-		WebGpuFrame.textures().update(name, level, x, y, width, height, pixels);
+		WebGpuFrame.textures().update(name, level, x, y, width, height, rgba);
 		if (level == 0) {
 			// Level 0 landed; regenerate the levels underneath it for exactly this region. Doing it
 			// here rather than at any particular animator covers beta's binders, RetroAPI's mcmeta
 			// animations and any mod, because all of them arrive as this one call.
-			AnimatedMipmaps.regenerate(name, x, y, width, height, pixels);
+			AnimatedMipmaps.regenerate(name, x, y, width, height, rgba);
 		}
+	}
+
+	// --- texture queries ----------------------------------------------------------------------------
+	//
+	// Both of these used to return 0, which is not a neutral answer: it is "this device cannot do
+	// that". StationAPI reads its atlas budget from them, and a zero there caps the stitched sheet at
+	// 1024 texels -- enough to lose sprites outright once a few content mods are installed.
+
+	private static final int GL_TEXTURE_2D = 0x0DE1;
+	private static final int GL_PROXY_TEXTURE_2D = 0x8064;
+	private static final int GL_TEXTURE_WIDTH = 0x1000;
+	private static final int GL_TEXTURE_HEIGHT = 0x1001;
+	private static final int GL_MAX_TEXTURE_SIZE = 0x0D33;
+
+	/** The last GL_PROXY_TEXTURE_2D request, or 0 when the device refused it. */
+	private static volatile int proxyWidth;
+	private static volatile int proxyHeight;
+	private static volatile int maxTextureSize;
+
+	public static int glGetInteger(int name) {
+		// Only the one the shim can answer truthfully. Everything else keeps GL's "unknown" rather
+		// than inventing a number the renderer would then be held to.
+		return name == GL_MAX_TEXTURE_SIZE ? maxTextureSize() : 0;
+	}
+
+	public static int glGetTexLevelParameteri(int target, int level, int parameter) {
+		if (target == GL_PROXY_TEXTURE_2D) {
+			return level != 0 ? 0
+				: parameter == GL_TEXTURE_WIDTH ? proxyWidth
+				: parameter == GL_TEXTURE_HEIGHT ? proxyHeight : 0;
+		}
+		if (target != GL_TEXTURE_2D) {
+			return 0;
+		}
+		com.periut.retrodragon.render.TextureStore textures = WebGpuFrame.textures();
+		int name = shim().boundTexture();
+		if (!textures.has(name)) {
+			return 0;
+		}
+		com.periut.retrodragon.gpu.GpuTexture texture = textures.get(name);
+		return switch (parameter) {
+			case GL_TEXTURE_WIDTH -> Math.max(1, texture.width() >> level);
+			case GL_TEXTURE_HEIGHT -> Math.max(1, texture.height() >> level);
+			default -> 0;
+		};
+	}
+
+	/** The device's real 2D limit, asked for once. */
+	private static int maxTextureSize() {
+		if (maxTextureSize == 0) {
+			// The probe can arrive before anything has drawn; the device has to exist to be asked.
+			WebGpuFrame.active();
+			maxTextureSize = com.periut.retrodragon.gpu.GpuTexture.maxDimension(
+				com.periut.retrodragon.render.GpuBackend.context());
+		}
+		return maxTextureSize;
+	}
+
+	/**
+	 * Pixel-store state, which decides how the next upload's buffer is read.
+	 *
+	 * <p>Was excused as a no-op on the grounds that beta never sets it. StationAPI sets it around
+	 * every single upload -- it is how {@code NativeImage} addresses one animation frame inside a
+	 * sprite sheet -- so ignoring it uploaded the wrong rectangle. See {@link PixelStore}.
+	 */
+	public static void glPixelStorei(int parameter, int value) {
+		PixelStore.store(parameter, value);
 	}
 
 	// --- immediate mode ----------------------------------------------------------------------------

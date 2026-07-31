@@ -15,7 +15,7 @@ plugins {
 base {
 	archivesName = project.archives_base_name
 }
-version = "${project.version}+mc${project.minecraft_version}"
+version = project.version
 group = project.maven_group
 
 ploceus {
@@ -25,6 +25,15 @@ ploceus {
 def lwjglVersion = project.lwjgl_version
 // Dawn (WebGPU) natives, published by jWebGPU. Decoupled from this project's version on purpose.
 ext.dawnVersion = project.findProperty('dawn_version') ?: '0.3.4'
+
+// Shared by the dependency block and by the published pom, and they must not drift: fabric-loader
+// does not unpack nested jars in a DEVELOPMENT environment, so a downstream mod's `./gradlew
+// runClient` sees none of the JiJ'd LWJGL 3 or Dawn classes. The pom has to ask gradle for the same
+// coordinates or every consumer dies in Minecraft.init with
+// NoClassDefFoundError: org/lwjgl/glfw/GLFWWindowSizeCallbackI. See "Publishing" below.
+def lwjglModules = ['lwjgl', 'lwjgl-glfw', 'lwjgl-openal', 'lwjgl-opengl', 'lwjgl-sdl']
+def lwjglNativePlatforms = ['linux', 'windows', 'macos', 'windows-arm64', 'macos-arm64', 'linux-arm64']
+def dawnPlatforms = ['linux_x64', 'mac_x64', 'mac_arm64']
 
 loom {
 	accessWidenerPath = file("src/main/resources/retrodragon.accessWidener")
@@ -110,22 +119,18 @@ dependencies {
 	api platform("org.lwjgl:lwjgl-bom:${lwjglVersion}")
 	include platform("org.lwjgl:lwjgl-bom:${lwjglVersion}")
 
-	['linux', 'windows', 'macos', 'windows-arm64', 'macos-arm64', 'linux-arm64'].each { platform ->
-		include runtimeOnly("org.lwjgl:lwjgl::natives-${platform}")
-		include runtimeOnly("org.lwjgl:lwjgl-glfw::natives-${platform}")
-		include runtimeOnly("org.lwjgl:lwjgl-openal::natives-${platform}")
-		include runtimeOnly("org.lwjgl:lwjgl-opengl::natives-${platform}")
-		include runtimeOnly("org.lwjgl:lwjgl-sdl::natives-${platform}")
+	lwjglNativePlatforms.each { platform ->
+		lwjglModules.each { module ->
+			include runtimeOnly("org.lwjgl:${module}::natives-${platform}")
+		}
 	}
 
-	include api("org.lwjgl:lwjgl:${lwjglVersion}")
-	include api("org.lwjgl:lwjgl-glfw:${lwjglVersion}")
-	include api("org.lwjgl:lwjgl-openal:${lwjglVersion}")
-	// SDL3: the replacement for GLFW as window/context/input backend. Verified to give a GL 4.6
-	// COMPATIBILITY context (which beta's fixed-function rendering requires) plus the native
-	// Wayland/Metal/Win32/Xlib handles a WebGPU surface is created from.
-	include api("org.lwjgl:lwjgl-sdl:${lwjglVersion}")
-	include api("org.lwjgl:lwjgl-opengl:${lwjglVersion}")
+	// lwjgl-sdl is SDL3: the replacement for GLFW as window/context/input backend. Verified to give
+	// a GL 4.6 COMPATIBILITY context (which beta's fixed-function rendering requires) plus the
+	// native Wayland/Metal/Win32/Xlib handles a WebGPU surface is created from.
+	lwjglModules.each { module ->
+		include api("org.lwjgl:${module}:${lwjglVersion}")
+	}
 
 	// ---------------------------------------------------------------------------------------
 	// StationAPI: COMPILE ONLY. It is deliberately absent from every runtime classpath.
@@ -166,7 +171,7 @@ dependencies {
 	// bind a single call against it -- Windows is served by downloadWindowsDawn below instead.
 	// See gradle.properties (dawn_windows_tag) and WebGPUNatives.resourcePath().
 	// ---------------------------------------------------------------------------------------
-	['linux_x64', 'mac_x64', 'mac_arm64'].each { platform ->
+	dawnPlatforms.each { platform ->
 		include runtimeOnly("com.github.xpenatan.jWebGPU:webgpu-desktop-jni-dawn_${platform}:${dawnVersion}")
 	}
 }
@@ -567,6 +572,7 @@ tasks.withType(JavaExec).matching { it.name.startsWith('run') }.configureEach {
  'com.periut.retrodragon.render.ArenaAllocator': 'arenaTest',
  'com.periut.retrodragon.render.VertexSink'    : 'vertexSinkTest',
  'com.periut.retrodragon.shim.GlCoverage'      : 'glCoverage',
+ 'com.periut.retrodragon.shim.PixelStore'      : 'pixelStoreTest',
  'com.periut.retrodragon.render.LineExpander'  : 'lineExpanderTest'].each { mainName, taskName ->
 	tasks.register(taskName, JavaExec) {
 		group = 'verification'
@@ -622,7 +628,8 @@ tasks.register('selfChecks') {
 	group = 'verification'
 	description = 'Every CPU-side self-check.'
 	dependsOn 'pipelineKeyTest', 'glShimTest', 'glStateTest', 'occlusionTest', 'arenaTest',
-		'vertexSinkTest', 'glCoverage', 'lineExpanderTest', 'blockAtlasTest', 'noRawGlfwCheck'
+		'vertexSinkTest', 'glCoverage', 'lineExpanderTest', 'blockAtlasTest', 'pixelStoreTest',
+		'noRawGlfwCheck'
 }
 
 // The Dawn bring-up check that used to live in retrogpu as ':retrogpu:smokeTest'.
@@ -740,6 +747,12 @@ tasks.named('verifyNoStubsInJar') {
 // The REMAPPED jar, not the raw one: a consumer's Loom remaps a mod dependency from intermediary
 // into its own mappings, and the raw jar carries named ones. Publishing that instead produces a
 // dependency that compiles and then cannot find a single method at runtime.
+//
+// The pom carries the LWJGL 3 and Dawn coordinates even though the jar already NESTS them, because
+// jar-in-jar reaches a production install and nothing else -- fabric-loader does not unpack nested
+// jars in a development environment. Without these, a consumer's `./gradlew runClient` starts with
+// zero org.lwjgl.* on the classpath and crashes in Minecraft.init. Both halves are needed: the pom
+// for a dev run, the nesting for a shipped jar where there is no gradle to resolve anything.
 // ---------------------------------------------------------------------------------------------
 publishing {
 	publications {
@@ -751,7 +764,43 @@ publishing {
 			artifact(tasks.named('sourcesJar')) {
 				classifier = 'sources'
 			}
+
+			pom.withXml {
+				def deps = asNode().appendNode('dependencies')
+				def add = { String group, String artifact, String ver, String classifier ->
+					def d = deps.appendNode('dependency')
+					d.appendNode('groupId', group)
+					d.appendNode('artifactId', artifact)
+					d.appendNode('version', ver)
+					if (classifier) d.appendNode('classifier', classifier)
+					d.appendNode('scope', 'runtime')
+					return d
+				}
+				lwjglModules.each { module ->
+					add('org.lwjgl', module, lwjglVersion, null)
+					lwjglNativePlatforms.each { platform ->
+						add('org.lwjgl', module, lwjglVersion, "natives-${platform}")
+					}
+				}
+				dawnPlatforms.each { platform ->
+					def d = add('com.github.xpenatan.jWebGPU', "webgpu-desktop-jni-dawn_${platform}",
+						dawnVersion, null)
+					// Same reason as the configurations.configureEach exclude above: jParser's
+					// natives sit at the JAR ROOT, nothing here loads them, and root-level natives
+					// are what collides. A consumer must not inherit them either.
+					def ex = d.appendNode('exclusions').appendNode('exclusion')
+					ex.appendNode('groupId', 'com.github.xpenatan.jParser')
+					ex.appendNode('artifactId', '*')
+				}
+			}
 		}
+	}
+
+	// Gradle Module Metadata would take precedence over the pom for gradle consumers, and it is
+	// derived from the java component -- which this publication deliberately does not use, so it
+	// would advertise the raw jar and none of the dependencies above. The pom is the only truth.
+	tasks.withType(GenerateModuleMetadata).configureEach {
+		enabled = false
 	}
 	repositories {
 		mavenLocal()

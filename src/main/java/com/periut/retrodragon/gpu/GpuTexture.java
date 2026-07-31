@@ -74,6 +74,27 @@ public final class GpuTexture implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * The largest 2D texture this device will create, for {@code glGetInteger(GL_MAX_TEXTURE_SIZE)}.
+	 *
+	 * <p>Answered from the device rather than assumed, because StationAPI sizes its stitched atlas by
+	 * it: too small and sprites are dropped from the sheet, too large and the create fails outright.
+	 * 8192 is WebGPU's guaranteed minimum and so the only safe answer when there is no device yet.
+	 */
+	public static int maxDimension(WebGPUContext ctx) {
+		if (ctx == null) {
+			return 8192;
+		}
+		try (Arena tmp = Arena.ofConfined()) {
+			MemorySegment limits = com.periut.webgpu.WGPULimits.allocate(tmp);
+			wgpuDeviceGetLimits(ctx.device(), limits);
+			int max = com.periut.webgpu.WGPULimits.maxTextureDimension2D(limits);
+			return max > 0 ? max : 8192;
+		} catch (RuntimeException e) {
+			return 8192;
+		}
+	}
+
 	/** A 1x1 opaque white texture, so a pipeline with texturing disabled still has something bound. */
 	public static GpuTexture white(WebGPUContext ctx) {
 		GpuTexture t = create(ctx, 1, 1, 1, "retrodragon-white");

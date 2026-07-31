@@ -60,7 +60,6 @@ public final class GlCoverage {
 			"glTexCoordPointer", "glDrawArrays", "glEnableClientState", "glDisableClientState" }) {
 			EXCUSED.put(m, "Tessellator vertex-array path; its buffer is captured directly instead");
 		}
-		EXCUSED.put("glPixelStorei", "pack/unpack alignment 1; readback is already tightly packed");
 		EXCUSED.put("glColorMaterial",
 			"only ever FRONT_AND_BACK/AMBIENT_AND_DIFFUSE, which is what the shader already does");
 		EXCUSED.put("glClearDepth", "only ever 1.0, which is the pass's depthClearValue");
@@ -118,6 +117,69 @@ public final class GlCoverage {
 			System.exit(1);
 		}
 		System.out.println("GL coverage OK: every GL11 entry point b1.7.3 calls is handled or excused");
+		reportContentApis(implemented);
+	}
+
+	/**
+	 * The same scan over the content APIs the dev runs install, when they have been fetched.
+	 *
+	 * <p>Beta is not the only caller the shim has to answer, and this is where that was learned: every
+	 * texture StationAPI owns is allocated through {@code glTexImage2D(..., IntBuffer)}, an overload
+	 * the bridge did not have, so its stitched block atlas was never created and every block drew
+	 * white. Nothing in the Minecraft jar calls that overload, so the scan above could not see it.
+	 *
+	 * <p>Reported rather than enforced. These jars are optional, downloaded by
+	 * {@code runClientStapi}/{@code runClientRapi} rather than built against, and a mod may legitimately
+	 * use GL the shim has no answer for -- the value here is that the gap is VISIBLE, which silence was
+	 * not.
+	 */
+	private static void reportContentApis(Set<String> implemented) throws Exception {
+		Path root = Path.of("build", "contentApis");
+		if (!Files.isDirectory(root)) {
+			return;
+		}
+		Map<String, Integer> used = new TreeMap<>();
+		Map<String, Set<String>> callers = new TreeMap<>();
+		try (var jars = Files.walk(root)) {
+			for (Path jar : jars.filter(p -> p.toString().endsWith(".jar")).toList()) {
+				scanJar(jar, used, callers);
+			}
+		}
+		List<String> missing = used.keySet().stream()
+			.filter(s -> !implemented.contains(s))
+			.filter(s -> !EXCUSED.containsKey(s.substring(0, s.indexOf('('))))
+			.toList();
+		System.out.println("content APIs: " + used.size() + " distinct GL11 entry points used, "
+			+ missing.size() + " unhandled");
+		for (String signature : missing) {
+			System.out.println("    " + signature + "  x" + used.get(signature)
+				+ "  <- " + String.join(", ", callers.get(signature)));
+		}
+	}
+
+	/** Reads one jar, and the jar-in-jars a content API ships its modules as. */
+	private static void scanJar(Path path, Map<String, Integer> used, Map<String, Set<String>> callers)
+			throws Exception {
+
+		try (JarFile jar = new JarFile(path.toFile())) {
+			for (JarEntry e : java.util.Collections.list(jar.entries())) {
+				if (e.getName().endsWith(".class")) {
+					try (InputStream in = jar.getInputStream(e)) {
+						scan(new ClassReader(in.readAllBytes()), used, callers);
+					}
+				} else if (e.getName().startsWith("META-INF/jars/") && e.getName().endsWith(".jar")) {
+					Path nested = Files.createTempFile("glcoverage", ".jar");
+					try (InputStream in = jar.getInputStream(e)) {
+						Files.copy(in, nested, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+					}
+					try {
+						scanJar(nested, used, callers);
+					} finally {
+						Files.deleteIfExists(nested);
+					}
+				}
+			}
+		}
 	}
 
 	/** @return how many game classes were read */

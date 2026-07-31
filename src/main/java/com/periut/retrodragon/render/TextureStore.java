@@ -100,10 +100,17 @@ public final class TextureStore implements AutoCloseable {
 		texture.upload(level, x, y, width, height, rgba);
 	}
 
-	/** Uploads a level explicitly, for callers that already hold a chain. */
+	/**
+	 * Uploads a level explicitly, for callers that already hold a chain.
+	 *
+	 * <p>Bounded by what was allocated. A content API declares its chain by uploading every level
+	 * whether or not this store built one for that texture -- StationAPI allocates five levels for
+	 * every atlas -- and a write past {@code mipLevelCount} is a Dawn validation error per call, not
+	 * a dropped write.
+	 */
 	public synchronized void defineLevel(int name, int level, int width, int height, ByteBuffer rgba) {
 		GpuTexture texture = textures.get(name);
-		if (texture != null && rgba != null) {
+		if (texture != null && rgba != null && level >= 0 && level < texture.mipLevels()) {
 			texture.upload(level, 0, 0, width, height, rgba);
 		}
 	}
