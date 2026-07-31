@@ -2,8 +2,8 @@ plugins {
 	// java-library, not java: the LWJGL 3 modules are exposed with `api` so the BOM's
 	// constraints reach every consumer of the merged source set.
 	id 'java-library'
-	id 'net.fabricmc.fabric-loom-remap' version '1.16.3'
-	id 'ploceus' version '1.16.1'
+	id 'net.fabricmc.fabric-loom-remap' version '1.17.13'
+	id 'ploceus' version '1.17.4'
 	// Also builds a babric variant (build/libs/<name>-babric.jar).
 	id 'com.periut.retroconvert' version "${retroconvert_version}"
 	// So `./gradlew publishToMavenLocal` puts this build's jar where a companion mod -- RetroShader,
@@ -83,6 +83,14 @@ repositories {
 	maven { url = 'https://maven.wispforest.io' }
 	maven { url = 'https://maven.minecraftforge.net/' }
 	maven { url = 'https://jitpack.io/' }
+	// Loom >= 1.17 claims the whole org.lwjgl group for Mojang's libraries repo, which mirrors
+	// LWJGL 3.4.0 for the platforms Minecraft ships and NOT natives-linux-arm64 - so the arm64
+	// includes below stop resolving. Claiming the group for Central as well (exactly what
+	// LoomRepositoryPlugin.forceLWJGLFromMavenCentral does) puts both repos back in play.
+	exclusiveContent {
+		forRepository { mavenCentral() }
+		filter { includeGroup('org.lwjgl') }
+	}
 	exclusiveContent {
 		forRepository {
 			maven { url = 'https://api.modrinth.com/maven' }
