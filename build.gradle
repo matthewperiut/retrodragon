@@ -105,14 +105,27 @@ dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
-	mappings ploceus.mappings("net.glasslauncher:biny-ornithe:b1.7.3+build.${project.biny_mappings}:mergedv2")
-
+	// ORDER MATTERS, and only since ploceus 1.17. These four have to be declared BEFORE the mappings
+	// dependency: 1.17 resolves them at the moment `ploceus.mappings(...)` is evaluated, where 1.16
+	// extracted them eagerly whenever they turned up. Declared afterwards, the nests configuration is
+	// still empty when ploceus reads it, NestsProvider.provide() returns on its null dependency, and
+	// the jar is remapped with no inner classes at all -- silently, because the guard ploceus added
+	// for this ("Nests dependencies must be declared before the mappings dependency!") does not fire
+	// on this path.
+	//
+	// What that costs is not obvious from the symptom. Every class that should have been nested stays
+	// top-level in net/minecraft/unmapped/, which SPLITS PACKAGES that have to stay whole -- b1.7.3
+	// bundles argo, whose helpers then sit outside argo.jdom and lose package-private access to it,
+	// and the game dies in Minecraft.init the moment there is a stats file to parse. See the argo
+	// block in retrodragon.accessWidener, which is the workaround this ordering makes unnecessary.
 	clientExceptions ploceus.raven(project.client_raven_build, 'client')
 	serverExceptions ploceus.raven(project.server_raven_build, 'server')
 	clientSignatures ploceus.sparrow(project.client_sparrow_build, 'client')
 	serverSignatures ploceus.sparrow(project.server_sparrow_build, 'server')
 	clientNests "net.glasslauncher:biny-nests:b1.7.3-client+build.${project.biny_nests_build}"
 	serverNests "net.glasslauncher:biny-nests:b1.7.3-server+build.${project.biny_nests_build}"
+
+	mappings ploceus.mappings("net.glasslauncher:biny-ornithe:b1.7.3+build.${project.biny_mappings}:mergedv2")
 
 	// DEV RUNTIME ONLY. RetroDragon itself no longer requires OSL -- its fabric.mod.json depends on
 	// fabric-loader and Minecraft alone -- but RetroAPI does (osl-entrypoints, osl-lifecycle-events,
