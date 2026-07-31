@@ -3,9 +3,20 @@ package com.periut.retrodragon;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import net.ornithemc.osl.entrypoints.api.ModInitializer;
-
-public class RetroDragon implements ModInitializer {
+/**
+ * Shared logging for the mod. Deliberately NOT an entrypoint.
+ *
+ * <p>This used to implement OSL's {@code ModInitializer} for an {@code init} that called
+ * {@link com.periut.retrodragon.render.RenderBackend#select()} -- which
+ * {@link RetroDragonPreLaunch} had already called, because beta builds its window inside
+ * {@code Minecraft.init()} and that runs BEFORE OSL's init entrypoint. The second call was a no-op
+ * by construction ({@code select()} keeps its first answer), so the entrypoint bought one log line
+ * at the price of a hard dependency on OSL for a mod that used nothing else from it.
+ *
+ * <p>RetroDragon now depends on fabric-loader and Minecraft alone. Both content APIs remain
+ * optional and are still detected at runtime; RetroAPI brings OSL in on its own account.
+ */
+public class RetroDragon {
 
 	public static final Logger LOGGER = LogManager.getLogger("RetroDragon");
 
@@ -25,11 +36,6 @@ public class RetroDragon implements ModInitializer {
 		}
 	}
 
-	@Override
-	public void init() {
-		// Before anything creates a window: a WebGPU surface needs one with no GL context, and that
-		// is decided at SDL_CreateWindow, not afterwards.
-		com.periut.retrodragon.render.RenderBackend.select();
-		LOGGER.info("RetroDragon loaded");
+	private RetroDragon() {
 	}
 }

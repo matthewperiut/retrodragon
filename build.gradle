@@ -114,6 +114,9 @@ dependencies {
 	clientNests "net.glasslauncher:biny-nests:b1.7.3-client+build.${project.biny_nests_build}"
 	serverNests "net.glasslauncher:biny-nests:b1.7.3-server+build.${project.biny_nests_build}"
 
+	// DEV RUNTIME ONLY. RetroDragon itself no longer requires OSL -- its fabric.mod.json depends on
+	// fabric-loader and Minecraft alone -- but RetroAPI does (osl-entrypoints, osl-lifecycle-events,
+	// osl-networking), so runClientRapi needs it on the classpath. StationAPI needs none of it.
 	ploceus.dependOsl(project.osl_version)
 
 	// OSL's block and item REGISTRY modules, dropped from the dev runtime.
@@ -126,8 +129,8 @@ dependencies {
 	//     at net.ornithemc.osl.blocks.impl.VanillaBlocks.init
 	//
 	// which is what runClientStapi started doing when the OSL bundle grew these two. Nothing in this
-	// mod uses either (osl-entrypoints is the one OSL dependency it declares), and they are dev-only
-	// -- a real install resolves OSL from fabric.mod.json, not from here.
+	// mod uses either -- nothing here uses OSL at all any more -- and they are dev-only: a real
+	// install gets OSL because RetroAPI asked for it, or not at all.
 	configurations.modImplementation {
 		exclude group: 'net.ornithemc.osl-gen2', module: 'blocks'
 		exclude group: 'net.ornithemc.osl-gen2', module: 'items'

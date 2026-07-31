@@ -19,9 +19,6 @@
 			"com.periut.retrodragon.window.RetroWindowPreLaunch",
 			"com.periut.retrodragon.RetroDragonPreLaunch"
 		],
-		"init": [
-			"com.periut.retrodragon.RetroDragon"
-		],
 		"main": [
 			"com.periut.retrodragon.retrocenter.RetroCenterMain"
 		]
@@ -33,7 +30,6 @@
 	"depends": {
 		"fabricloader": ">=0.19.3",
 		"minecraft": "1.0.0-beta.7.3",
-		"osl-entrypoints": ">=0.4.0",
 		"java": ">=25"
 	}
 }
