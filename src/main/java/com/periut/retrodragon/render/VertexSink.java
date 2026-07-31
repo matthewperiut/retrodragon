@@ -44,6 +44,15 @@ public final class VertexSink {
 	 */
 	private int strideInts = STRIDE_INTS;
 	private boolean compact;
+	/**
+	 * Sprite sizes for a stitched atlas, or null when the sheet is a plain grid.
+	 *
+	 * <p>Sampled once per {@code begin} like the layout flags, and for the same reason: it decides
+	 * what a vertex CONTAINS, and a buffer half written in each shape is not recoverable. A resource
+	 * reload replaces the table and re-meshes every section, so a section never spans two.
+	 */
+	private BlockAtlas.SpriteGrid sprites;
+	private int spriteSlot = -1;
 
 	/**
 	 * Read once per {@code begin}, not per vertex, and held for the batch.
@@ -72,6 +81,11 @@ public final class VertexSink {
 		this.splitQuads = !QuadVertices.indexed();
 		this.compact = TerrainVertex.compact();
 		this.strideInts = TerrainVertex.strideInts(this.compact);
+		this.sprites = TerrainVertex.spriteClamp() ? BlockAtlas.spriteGrid() : null;
+		// Where the size byte goes: the compact layout's extra word, or beta's unused pad word.
+		this.spriteSlot = TerrainVertex.spriteClamp()
+			? TerrainVertex.spriteOffset(this.compact) / 4
+			: -1;
 		this.offX = offX;
 		this.offY = offY;
 		this.offZ = offZ;
@@ -220,6 +234,14 @@ public final class VertexSink {
 			this.buf[this.pos + 4] = Float.floatToRawIntBits(this.v);
 			this.buf[this.pos + 5] = this.color;
 			this.buf[this.pos + 6] = this.normal;
+		}
+		if (this.spriteSlot >= 0) {
+			// The owning sprite's edge length, from which the shader recovers its origin. Every corner
+			// of a quad lands in the same sprite, so this is looked up per vertex rather than tracked
+			// per quad -- the sink never sees a quad boundary, and the lookup is two shifts.
+			int size = this.sprites == null ? 0 : this.sprites.sizeAt(this.u, this.v);
+			// The size itself, not its log: the shader wants texels, and a byte holds up to 255.
+			this.buf[this.pos + this.spriteSlot] = Math.min(size, 255);
 		}
 		this.pos += stride;
 		this.vertexCount++;

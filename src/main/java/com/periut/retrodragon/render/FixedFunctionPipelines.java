@@ -71,6 +71,26 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 		{ 2, 16, WGPUVertexFormat_Unorm8x4() },
 	};
 
+	/**
+	 * Either layout plus the sprite size a stitched atlas needs.
+	 *
+	 * <p>{@code Uint8x4} rather than a single byte because WebGPU has no 8-bit scalar vertex format;
+	 * only .x is read. The legacy variant costs nothing -- it lands in beta's existing pad word.
+	 */
+	private static final int[][] TERRAIN_COMPACT_SPRITE_ATTRIBUTES = {
+		{ 0, 0, WGPUVertexFormat_Float32x3() },
+		{ 1, 12, WGPUVertexFormat_Unorm16x2() },
+		{ 2, 16, WGPUVertexFormat_Unorm8x4() },
+		{ 3, 20, WGPUVertexFormat_Uint8x4() },
+	};
+
+	private static final int[][] TERRAIN_LEGACY_SPRITE_ATTRIBUTES = {
+		{ 0, 0, WGPUVertexFormat_Float32x3() },
+		{ 1, 12, WGPUVertexFormat_Float32x2() },
+		{ 2, 20, WGPUVertexFormat_Unorm8x4() },
+		{ 3, 28, WGPUVertexFormat_Uint8x4() },
+	};
+
 	/** Indexed by {@code PipelineKey.PROGRAM_*}. */
 	private static final String[] SHADER_PATHS = {
 		"/assets/retrodragon/shaders/wgsl/fixedfunc.wgsl",
@@ -80,6 +100,10 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	};
 
 	/** Markers delimiting the region {@link PipelineKey#PROGRAM_TERRAIN_OPAQUE} removes. */
+	/** Delimits the lines that only exist when the vertex carries a sprite size. */
+	private static final String SPRITE_BEGIN = "//@SPRITE_BEGIN";
+	private static final String SPRITE_END = "//@SPRITE_END";
+
 	private static final String ALPHA_TEST_BEGIN = "//@ALPHA_TEST_BEGIN";
 	private static final String ALPHA_TEST_END = "//@ALPHA_TEST_END";
 
@@ -274,6 +298,14 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	 */
 	private static String builtIn(int index) {
 		String source = source(SHADER_PATHS[index]);
+		boolean terrain = index == PipelineKey.PROGRAM_TERRAIN
+			|| index == PipelineKey.PROGRAM_TERRAIN_OPAQUE;
+		if (terrain && !TerrainVertex.spriteClamp()) {
+			// No stitched atlas: the vertex does not carry a sprite size, so the attribute is not in
+			// the pipeline's layout either. Reading a location the layout does not declare is invalid
+			// WGSL, hence a textual cut rather than a branch -- the same reasoning as the alpha test.
+			source = strip(source, SPRITE_BEGIN, SPRITE_END);
+		}
 		if (index != PipelineKey.PROGRAM_TERRAIN_OPAQUE) {
 			return source;
 		}
@@ -284,6 +316,19 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 				+ " / " + ALPHA_TEST_END + " markers; the opaque variant cannot be built");
 		}
 		return source.substring(0, begin) + source.substring(end + ALPHA_TEST_END.length());
+	}
+
+	/** Cuts every {@code begin}..{@code end} region out, markers included. */
+	private static String strip(String source, String begin, String end) {
+		StringBuilder out = new StringBuilder(source);
+		for (int at = out.indexOf(begin); at >= 0; at = out.indexOf(begin)) {
+			int close = out.indexOf(end, at);
+			if (close < 0) {
+				throw new IllegalStateException("terrain.wgsl has " + begin + " with no " + end);
+			}
+			out.delete(at, close + end.length());
+		}
+		return out.toString();
 	}
 
 	static String source(String path) {
@@ -336,7 +381,10 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 			.vertexLayout(
 				terrain ? TerrainVertex.stride(compactTerrain) : VERTEX_STRIDE,
 				terrain
-					? (compactTerrain ? TERRAIN_COMPACT_ATTRIBUTES : TERRAIN_LEGACY_ATTRIBUTES)
+					? (TerrainVertex.spriteClamp()
+						? (compactTerrain
+							? TERRAIN_COMPACT_SPRITE_ATTRIBUTES : TERRAIN_LEGACY_SPRITE_ATTRIBUTES)
+						: (compactTerrain ? TERRAIN_COMPACT_ATTRIBUTES : TERRAIN_LEGACY_ATTRIBUTES))
 					: VERTEX_ATTRIBUTES)
 			.layout(shared.layoutFor(program));
 

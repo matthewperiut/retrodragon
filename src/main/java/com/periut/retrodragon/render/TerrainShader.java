@@ -26,6 +26,9 @@ import org.lwjgl.opengl.GL20;
  * back to fixed function.
  */
 public final class TerrainShader {
+	/** Generic vertex attribute carrying the per-sprite pitch; see {@link #build()} for the slot. */
+	public static final int SPRITE_ATTRIB = 7;
+
 	private static int program;
 	private static int uAtlasSize;
 	private static int uTileTexels;
@@ -49,6 +52,15 @@ public final class TerrainShader {
 	 *     clamp off, since there is no tile to clamp into
 	 */
 	public static boolean begin(float atlasWidth, float atlasHeight, float tileTexels, float maxLod) {
+		return begin(atlasWidth, atlasHeight, tileTexels, maxLod, TerrainVertex.spriteClamp());
+	}
+
+	/**
+	 * @param spriteClamp true when every vertex carries its own sprite pitch, which is what lets a
+	 *     STITCHED atlas mipmap and supersample even though {@code tileTexels} is 0
+	 */
+	public static boolean begin(float atlasWidth, float atlasHeight, float tileTexels, float maxLod,
+			boolean spriteClamp) {
 		if (broken || !Config.SHADER) {
 			return false;
 		}
@@ -66,8 +78,11 @@ public final class TerrainShader {
 		GL20.glUseProgram(program);
 		GL20.glUniform2f(uAtlasSize, atlasWidth, atlasHeight);
 		GL20.glUniform1f(uTileTexels, tileTexels);
-		GL20.glUniform1f(uMaxLod, tileTexels > 0.0F ? maxLod : 0.0F);
-		GL20.glUniform1f(uRgss, Config.RGSS && tileTexels > 0.0F ? 1.0F : 0.0F);
+		// A pitch arrives either as this uniform (grid) or per vertex (stitched). Gating the mip walk
+		// and RGSS on the uniform alone is what used to switch both off under StationAPI.
+		boolean clamped = tileTexels > 0.0F || spriteClamp;
+		GL20.glUniform1f(uMaxLod, clamped ? maxLod : 0.0F);
+		GL20.glUniform1f(uRgss, Config.RGSS && clamped ? 1.0F : 0.0F);
 		GL20.glUniform1i(uFogMode, FogState.mode());
 		active = true;
 		return true;
@@ -75,6 +90,10 @@ public final class TerrainShader {
 
 	public static void end() {
 		if (active) {
+			// Left enabled it would stay bound to a freed VBO for every later draw in the frame.
+			if (TerrainVertex.spriteClamp()) {
+				GL20.glDisableVertexAttribArray(SPRITE_ATTRIB);
+			}
 			GL20.glUseProgram(0);
 			active = false;
 		}
@@ -92,6 +111,12 @@ public final class TerrainShader {
 			int id = GL20.glCreateProgram();
 			GL20.glAttachShader(id, vertex);
 			GL20.glAttachShader(id, fragment);
+			// Bound explicitly, and NOT to a low slot. This program feeds itself from beta's
+			// fixed-function arrays (gl_Vertex, gl_Color, gl_MultiTexCoord0), and the compatibility
+			// profile lets a driver alias those onto generic attributes -- the conventional mapping is
+			// 0 vertex, 2 normal, 3 colour, 4 secondary colour, 5 fog coord, 8..15 texture coords.
+			// Slot 7 is outside all of them, so this cannot land on top of an array beta is filling.
+			GL20.glBindAttribLocation(id, SPRITE_ATTRIB, "spriteTexels");
 			GL20.glLinkProgram(id);
 			if (GL20.glGetProgrami(id, GL20.GL_LINK_STATUS) == GL11.GL_FALSE) {
 				String log = GL20.glGetProgramInfoLog(id, 2048);

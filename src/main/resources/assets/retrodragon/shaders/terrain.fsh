@@ -31,6 +31,8 @@ uniform int fogMode;       // 0 linear, 1 exp, 2 exp2 -- GLSL 120 gl_Fog has no 
 varying vec2 vUv;
 varying vec4 vColor;
 varying vec3 vEye;
+// Per-sprite pitch for a stitched sheet; 0 means the uniform grid pitch stands. See terrain.vsh.
+varying float vSpriteTexels;
 
 // Sample clamped into the owning tile, so a tap near a tile border cannot reach the next texture.
 vec4 tapTile(vec2 uv, vec2 lo, vec2 hi, float lod) {
@@ -52,11 +54,16 @@ void main() {
     vec2 fp = vec2(0.0);
     float lod = 0.0;
 
-    if (tileTexels > 0.0) {
-        vec2 tileSize = vec2(tileTexels) / atlasSize;
+    // A stitched sheet has no single pitch, so each vertex brought its own sprite's edge length.
+    // TextureStitcher places a sprite of size S at a multiple of S, so the floor() below finds its
+    // origin exactly as it finds a tile's and nothing after this point knows the difference.
+    float pitch = vSpriteTexels > 0.0 ? vSpriteTexels : tileTexels;
+
+    if (pitch > 0.0) {
+        vec2 tileSize = vec2(pitch) / atlasSize;
         vec2 tileOrigin = floor(vUv / tileSize) * tileSize;
         // One block is one tile across, so texels-per-pixel is density * texels-per-tile.
-        float texelsPerPixel = density * tileTexels;
+        float texelsPerPixel = density * pitch;
         lod = clamp(log2(max(texelsPerPixel, 1e-6)), 0.0, maxLod);
         // Widen the inset with the mip level: at level L a texel is 2^L level-0 texels across.
         vec2 inset = (exp2(lod) * 0.5) / atlasSize;

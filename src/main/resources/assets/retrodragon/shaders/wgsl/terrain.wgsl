@@ -54,10 +54,17 @@ struct Uniforms {
 // Dropping it is also what frees the layout to be COMPACT. `uv` is declared vec2<f32> and stays
 // that way whether the buffer holds two floats or two unorm16s -- a vertex format converts on fetch,
 // so both layouts drive this shader unchanged. See TerrainVertex.
+// spriteTexels is present only when a stitched atlas is installed -- see TerrainVertex.spriteClamp.
+// The pipeline declares it or does not; a shader that reads an undeclared location is invalid, so the
+// program is compiled with SPRITE_CLAMP substituted for the two lines that touch it. See
+// FixedFunctionPipelines.source.
 struct VertexIn {
     @location(0) position : vec3<f32>,
     @location(1) uv       : vec2<f32>,
     @location(2) color    : vec4<f32>,
+    //@SPRITE_BEGIN
+    @location(3) spriteTexels : vec4<u32>,
+    //@SPRITE_END
 };
 
 struct VertexOut {
@@ -68,6 +75,9 @@ struct VertexOut {
     // Eye-space position, carried so the fragment stage can take a derivative that does NOT jump
     // between atlas tiles. This is the whole trick behind correct LOD selection.
     @location(3) eye      : vec3<f32>,
+    // The owning sprite's edge length in texels. Flat: it is a per-quad constant, and interpolating
+    // it across a face would put a fractional pitch in the middle of every tile.
+    @location(4) @interpolate(flat) spriteTexels : f32,
 };
 
 @vertex
@@ -83,6 +93,12 @@ fn vs_main(in : VertexIn) -> VertexOut {
     out.eye = eye.xyz;
     out.fogDepth = length(eye.xyz);
     out.color = in.color * u.colorModulator;
+    // 0 when the layout does not carry it, which reads as "no sprite" and leaves the uniform pitch in
+    // charge -- the grid case, and the honest fallback for a sprite the table could not place.
+    out.spriteTexels = 0.0;
+    //@SPRITE_BEGIN
+    out.spriteTexels = f32(in.spriteTexels.x);
+    //@SPRITE_END
     return out;
 }
 
@@ -96,7 +112,14 @@ fn fs_main(in : VertexOut) -> @location(0) vec4<f32> {
     let atlasTexels = u.lightDir0.w;
     let maxLod = u.lightDir1.w;
     let rgss = u.lightAmbient.w;
-    let tileTexels = u.vertexFlags.w;
+    // A stitched sheet has no single pitch, so each vertex brought its own sprite's edge length.
+    // TextureStitcher places a sprite of size S at a multiple of S, so floor(uv / S) * S below finds
+    // its origin exactly as it finds a tile's -- the rest of this function does not know the
+    // difference. Zero means "not carried, or unplaceable", and the uniform grid pitch stands.
+    var tileTexels = u.vertexFlags.w;
+    if (in.spriteTexels > 0.0) {
+        tileTexels = in.spriteTexels;
+    }
 
     // World units covered by one pixel, from a coordinate that does not jump between faces.
     let density = max(length(dpdx(in.eye)), length(dpdy(in.eye)));

@@ -70,7 +70,7 @@ public final class TerrainMipmaps {
 		// black-under-transparent texels and every filtered read of it -- the RGSS taps, and the
 		// linear blend between level 0 and level 1 -- pulled that black into cutout edges. Alpha is
 		// untouched, so nearest sampling and the alpha test are unaffected.
-		int[][] chain = Mipmapper.build(pixels, width, height, BlockAtlas.tileTexels(), levels);
+		int[][] chain = Mipmapper.build(pixels, width, height, BlockAtlas.filterPitch(), levels);
 		int size = width;
 		for (int level = 0; level < chain.length; level++) {
 			uploadLevel(level, chain[level], size, size);

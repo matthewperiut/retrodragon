@@ -66,6 +66,85 @@ public final class BlockAtlas {
 	private static volatile int texels = 256;
 	private static volatile int tileTexels = 16;
 	private static volatile boolean uniformGrid = true;
+	private static volatile SpriteGrid spriteGrid;
+
+	/**
+	 * Where each sprite sits on a stitched sheet, in the one form the terrain path needs: its SIZE.
+	 *
+	 * <p>That is enough because {@code TextureStitcher} -- modern Minecraft's, which StationAPI uses --
+	 * rounds every slot to {@code smallestEncompassingPowerOfTwo} and subdivides recursively, so a slot
+	 * of size S always sits at a multiple of S. A sprite's origin is therefore
+	 * {@code floor(uv / size) * size}: exactly the formula both terrain shaders already use for a tile
+	 * grid, with a per-quad pitch instead of a global one. One byte per vertex carries it, rather than
+	 * the four-component rect that would be needed if the packing were arbitrary.
+	 *
+	 * <p>Immutable and published through a volatile field, because it is built on the render thread
+	 * during a resource reload and read by every mesh worker.
+	 */
+	public static final class SpriteGrid {
+		/** Cell pitch in texels: the smallest sprite, so no cell can straddle two sprites. */
+		private final int cellTexels;
+		private final int cells;
+		private final int atlasTexels;
+		/** {@code log2(sprite size)} per cell, 0 where nothing was mapped. */
+		private final byte[] sizeLog2;
+
+		SpriteGrid(int cellTexels, int cells, int atlasTexels) {
+			this.cellTexels = cellTexels;
+			this.cells = cells;
+			this.atlasTexels = atlasTexels;
+			this.sizeLog2 = new byte[cells * cells];
+		}
+
+		void put(int x, int y, int size) {
+			int log2 = Integer.numberOfTrailingZeros(size);
+			for (int cy = y / cellTexels; cy < (y + size) / cellTexels && cy < cells; cy++) {
+				for (int cx = x / cellTexels; cx < (x + size) / cellTexels && cx < cells; cx++) {
+					this.sizeLog2[cx + cy * cells] = (byte) log2;
+				}
+			}
+		}
+
+		/** The owning sprite's edge length in texels for a texture coordinate, or 0 if unmapped. */
+		public int sizeAt(float u, float v) {
+			return sizeAtTexel((int) (u * this.atlasTexels), (int) (v * this.atlasTexels));
+		}
+
+		/** The same, addressed in texels -- what a sub-image upload knows. */
+		public int sizeAtTexel(int x, int y) {
+			int cx = x / this.cellTexels;
+			int cy = y / this.cellTexels;
+			if (cx < 0 || cy < 0 || cx >= this.cells || cy >= this.cells) {
+				return 0;
+			}
+			int log2 = this.sizeLog2[cx + cy * this.cells];
+			return log2 == 0 ? 0 : 1 << log2;
+		}
+
+		/** Smallest sprite on the sheet, which is what bounds the mip chain. */
+		public int smallest() {
+			return this.cellTexels;
+		}
+	}
+
+	/**
+	 * The sprite table for a stitched sheet, or null when the atlas is a plain grid (vanilla,
+	 * RetroAPI, any HD pack) and the uniform pitch already describes it.
+	 */
+	public static SpriteGrid spriteGrid() {
+		return uniformGrid ? null : spriteGrid;
+	}
+
+	/**
+	 * Whether anything in this install can replace the atlas with a stitched sheet.
+	 *
+	 * <p>Answered from the MOD LIST, not from the atlas, because {@link TerrainVertex} has to fix the
+	 * vertex layout before the first resource reload has stitched anything. StationAPI can; RetroAPI
+	 * composites at a fixed sprite size and stays a grid, so it never needs the extra byte.
+	 */
+	public static boolean mayStitch() {
+		return StationApiAtlas.PRESENT;
+	}
 
 	/**
 	 * The GL name beta handed out for the block atlas, or -1 before it has been loaded.
@@ -130,6 +209,33 @@ public final class BlockAtlas {
 	}
 
 	/**
+	 * Whether a tap can be bounded to the texture it belongs to -- the one precondition mipmapping
+	 * and RGSS both rest on.
+	 *
+	 * <p>True two ways: a uniform grid, where one pitch describes the whole sheet, or a stitched
+	 * sheet whose sprites were placeable, where each vertex carries its own. Only an atlas that is
+	 * neither falls back to a single nearest tap at level 0.
+	 */
+	public static boolean clamped() {
+		return uniformGrid || spriteGrid != null;
+	}
+
+	/**
+	 * The smallest boundary {@link Mipmapper}'s box filter must not average across.
+	 *
+	 * <p>The grid pitch on a grid, and the smallest sprite on a stitched sheet -- in both cases the
+	 * thing that runs out of texels first as the chain deepens. 0 when neither is known, which stops
+	 * the chain being built at all.
+	 */
+	public static int filterPitch() {
+		if (uniformGrid) {
+			return tileTexels;
+		}
+		SpriteGrid grid = spriteGrid;
+		return grid == null ? 0 : grid.smallest();
+	}
+
+	/**
 	 * How many mip levels below 0 may exist for this atlas.
 	 *
 	 * <p>Bounded by the PITCH, not by the atlas size: the 2x2 box filter may not cross a tile
@@ -137,12 +243,29 @@ public final class BlockAtlas {
 	 * tile therefore allows 4 levels ({@code log2(16)}) whatever the sheet around it grew to.
 	 */
 	public static int mipLevels() {
-		return uniformGrid ? mipLevels(tileTexels) : 0;
+		if (uniformGrid) {
+			return mipLevels(tileTexels);
+		}
+		// Stitched but placeable: the chain is bounded by the SMALLEST sprite, for the same reason
+		// the grid bounds it by the pitch -- that is the one that runs out of texels first.
+		SpriteGrid grid = spriteGrid;
+		return grid == null ? 0 : mipLevels(grid.smallest());
 	}
 
-	/** True when this image can carry the tile-grid mip chain: a square sheet of whole tiles. */
+	/**
+	 * True when this image can carry the mip chain.
+	 *
+	 * <p>{@link Mipmapper} downsamples the whole sheet rather than looping per tile, which is correct
+	 * only because a 2x2 box at level L covers a 2^L-aligned region and every boundary on the sheet --
+	 * a grid pitch, or a stitched sprite's power-of-two slot -- is a multiple of it. That holds for
+	 * both shapes, so the only question is whether the sheet divides evenly.
+	 */
 	public static boolean canMipmap(int width, int height) {
-		return uniformGrid && canMipmap(width, height, tileTexels);
+		if (uniformGrid) {
+			return canMipmap(width, height, tileTexels);
+		}
+		SpriteGrid grid = spriteGrid;
+		return grid != null && canMipmap(width, height, grid.smallest());
 	}
 
 	// The two rules above with the pitch passed in, so the self-check can exercise every atlas shape
@@ -178,14 +301,24 @@ public final class BlockAtlas {
 		String source = "vanilla";
 
 		if (StationApiAtlas.PRESENT) {
-			// Stitched. The size is read only so the log tells the truth about it; no sampling
-			// decision may depend on a tile index here.
+			// Stitched -- but not necessarily gridless. StationAPI packs with modern Minecraft's
+			// TextureStitcher, which rounds every slot to a power of two and places it on its own
+			// multiple, so a pack whose sprites are all one size produces a plain uniform grid. For
+			// b1.7.3 content that is every sprite at 16x16, and the grid path both terrain shaders
+			// already implement is then exactly right. Only a pack that MIXES sprite sizes has no
+			// tile to reason about, and that case still falls back to one nearest tap.
 			int[] size = StationApiAtlas.size();
 			if (size != null) {
 				width = size[0];
 				height = size[1];
 			}
-			grid = false;
+			int[] sprites = StationApiAtlas.grid();
+			if (sprites != null && sprites[0] > 0 && width > 0 && width % sprites[0] == 0) {
+				tiles = width / sprites[0];
+				grid = true;
+			} else {
+				grid = false;
+			}
 			source = "stationapi";
 		} else if (RetroApiAtlas.PRESENT) {
 			// {composited size, sprite size} -- their ratio is the grid RetroAPI generates UVs for.
@@ -285,9 +418,18 @@ public final class BlockAtlas {
 		private static Object atlasId;
 		private static Method getWidth;
 		private static Method getHeight;
+		private static Field spriteMap;
+		private static Method spriteX;
+		private static Method spriteY;
+		private static Method spriteContents;
+		private static Method contentsWidth;
+		private static Method contentsHeight;
 		private static boolean linked;
 		private static boolean broken;
 		private static int[] cached;
+		/** {@code {pitch, count}} from the last successful sprite walk; pitch 0 = not a grid. */
+		private static int[] cachedGrid;
+		private static String reportedSprites = "";
 
 		static int[] size() {
 			// Throttled whether or not there is an answer yet: before the first resource reload the
@@ -306,11 +448,99 @@ public final class BlockAtlas {
 				int height = (Integer) getHeight.invoke(atlas);
 				if (width > 0 && height > 0) {
 					cached = new int[] { width, height };
+					cachedGrid = walkSprites(atlas);
 				}
 			} catch (Throwable t) {
 				// No atlas yet, most likely. Not fatal and not worth a log line every 64 frames.
 			}
 			return cached;
+		}
+
+		/** The grid this atlas turns out to be, or null when it has not been walked yet. */
+		static int[] grid() {
+			return cachedGrid;
+		}
+
+		/**
+		 * Whether the stitched sheet is, in fact, a uniform grid.
+		 *
+		 * <p>{@code TextureStitcher} is modern Minecraft's: it rounds every slot to
+		 * {@code smallestEncompassingPowerOfTwo} and subdivides recursively, so a slot of size S always
+		 * sits at a multiple of S. For b1.7.3 content every sprite is 16x16, which makes the sheet a
+		 * plain grid of 16-texel tiles -- the same shape RetroAPI produces, and one both terrain
+		 * shaders already sample correctly.
+		 *
+		 * <p>So this is not an approximation: it either finds one square power-of-two size shared by
+		 * every sprite, each sprite aligned to it, or it reports no grid and the caller falls back to a
+		 * single nearest tap. A pack that mixes sprite sizes lands in the second case honestly.
+		 *
+		 * @return {@code {pitch, spriteCount}}, pitch 0 when the sprites do not share one aligned size
+		 */
+		private static int[] walkSprites(Object atlas) throws Exception {
+			java.util.Map<?, ?> byId = (java.util.Map<?, ?>) spriteMap.get(atlas);
+			if (byId == null || byId.isEmpty()) {
+				return null;
+			}
+			int atlasTexels = (Integer) getWidth.invoke(atlas);
+			int pitch = 0;
+			int count = 0;
+			int smallest = Integer.MAX_VALUE;
+			int largest = 0;
+			boolean uniform = true;
+			// Every sprite square, a power of two, and on its own multiple. That is what
+			// TextureStitcher guarantees and what makes a size alone enough to find the origin; a
+			// sprite failing it gets no entry and falls back to a single nearest tap.
+			boolean placeable = true;
+			for (Object sprite : byId.values()) {
+				if (sprite == null) {
+					continue;
+				}
+				Object contents = spriteContents.invoke(sprite);
+				int w = (Integer) contentsWidth.invoke(contents);
+				int h = (Integer) contentsHeight.invoke(contents);
+				int x = (Integer) spriteX.invoke(sprite);
+				int y = (Integer) spriteY.invoke(sprite);
+				count++;
+				smallest = Math.min(smallest, Math.min(w, h));
+				largest = Math.max(largest, Math.max(w, h));
+				if (w != h || w < 2 || (w & (w - 1)) != 0 || x % w != 0 || y % h != 0) {
+					placeable = false;
+					uniform = false;
+				} else if (pitch == 0) {
+					pitch = w;
+				} else if (pitch != w) {
+					uniform = false;
+				}
+			}
+			if (!uniform) {
+				pitch = 0;
+			}
+
+			// The per-sprite table, built whenever the sheet is placeable but NOT a single grid --
+			// which is the case a tile index cannot describe and the per-vertex sprite size can.
+			SpriteGrid built = null;
+			if (placeable && !uniform && smallest >= 2 && atlasTexels % smallest == 0) {
+				built = new SpriteGrid(smallest, atlasTexels / smallest, atlasTexels);
+				for (Object sprite : byId.values()) {
+					if (sprite == null) {
+						continue;
+					}
+					Object contents = spriteContents.invoke(sprite);
+					built.put((Integer) spriteX.invoke(sprite), (Integer) spriteY.invoke(sprite),
+						(Integer) contentsWidth.invoke(contents));
+				}
+			}
+			spriteGrid = built;
+
+			String summary = count + " sprites, " + smallest + ".." + largest
+				+ (pitch > 0 ? ", uniform grid of " + pitch
+					: built != null ? ", mixed sizes -- per-sprite clamp on a " + smallest + " cell"
+					: ", not placeable -- no clamp");
+			if (!summary.equals(reportedSprites)) {
+				reportedSprites = summary;
+				RetroDragon.detail("stationapi atlas: {}", summary);
+			}
+			return new int[] { pitch, count };
 		}
 
 		/** Resolves every member in one go, so a half-linked state can never be used. */
@@ -331,6 +561,19 @@ public final class BlockAtlas {
 					"net.modificationstation.stationapi.api.client.texture.SpriteAtlasTexture");
 				getWidth = texture.getMethod("getWidth");
 				getHeight = texture.getMethod("getHeight");
+				// The sprite table is private, and there is no public enumerator on the atlas -- only
+				// getSprite(Identifier), which cannot answer "what shape is this sheet".
+				spriteMap = texture.getDeclaredField("sprites");
+				spriteMap.setAccessible(true);
+				Class<?> spriteClass = Class.forName(
+					"net.modificationstation.stationapi.api.client.texture.Sprite");
+				spriteX = spriteClass.getMethod("getX");
+				spriteY = spriteClass.getMethod("getY");
+				spriteContents = spriteClass.getMethod("getContents");
+				Class<?> contentsClass = Class.forName(
+					"net.modificationstation.stationapi.api.client.texture.SpriteContents");
+				contentsWidth = contentsClass.getMethod("getWidth");
+				contentsHeight = contentsClass.getMethod("getHeight");
 				getBakedModelManager = manager;
 				atlasId = id;
 				getAtlas = atlasOf;
@@ -388,7 +631,49 @@ public final class BlockAtlas {
 			expect(pitch >= 1, "level " + (level + 1) + " left a sub-texel tile");
 		}
 
+		spriteGridChecks();
+
 		System.out.println("BlockAtlas self-check OK");
+	}
+
+	/**
+	 * The stitched-sheet lookup: a mixed-size sheet, addressed the way a vertex addresses it.
+	 *
+	 * <p>The property that matters is that a coordinate ANYWHERE inside a sprite reports that
+	 * sprite's size, including at its last texel -- because the shader recovers the origin with
+	 * {@code floor(uv / size) * size}, and a size that is wrong by one step puts the clamp on a
+	 * neighbouring texture's boundary. A 32-sprite is checked at all four of its corners for exactly
+	 * that reason: it spans four 16-texel cells and every one of them has to agree.
+	 */
+	private static void spriteGridChecks() {
+		// 64x64 sheet: a 32 sprite at (0,0), 16s filling the rest of the top-left quadrant's row.
+		SpriteGrid grid = new SpriteGrid(16, 4, 64);
+		grid.put(0, 0, 32);
+		grid.put(32, 0, 16);
+		grid.put(48, 0, 16);
+		grid.put(32, 16, 16);
+
+		expect(grid.smallest() == 16, "the cell is the smallest sprite");
+		// Every corner of the 32 sprite, in texels, including its far edge.
+		for (int[] at : new int[][] { { 0, 0 }, { 31, 0 }, { 0, 31 }, { 31, 31 }, { 16, 16 } }) {
+			expect(grid.sizeAtTexel(at[0], at[1]) == 32,
+				"a 32 sprite reads 32 at texel " + at[0] + "," + at[1]);
+		}
+		expect(grid.sizeAtTexel(32, 0) == 16 && grid.sizeAtTexel(47, 15) == 16,
+			"the 16 sprite beside it reads 16");
+		expect(grid.sizeAtTexel(0, 48) == 0, "an unmapped cell reads 0, which disables the clamp");
+
+		// Through a texture coordinate, which is how the mesher asks. The last texel of the 32 sprite
+		// is at uv just under 32/64, and must still report 32 rather than the neighbour's 16.
+		expect(grid.sizeAt(0.0F, 0.0F) == 32, "uv 0,0 lands in the 32 sprite");
+		expect(grid.sizeAt(31.5F / 64.0F, 31.5F / 64.0F) == 32,
+			"the 32 sprite's last texel still reads 32");
+		expect(grid.sizeAt(32.5F / 64.0F, 0.5F / 64.0F) == 16,
+			"one texel further is the next sprite");
+
+		// The chain is bounded by the smallest sprite, exactly as it is by the pitch on a grid.
+		expect(mipLevels(16) == 4, "a 16-texel sprite allows 4 levels");
+		System.out.println("BlockAtlas sprite grid OK: mixed sizes resolve to the owning sprite");
 	}
 
 	private static void expect(boolean condition, String what) {

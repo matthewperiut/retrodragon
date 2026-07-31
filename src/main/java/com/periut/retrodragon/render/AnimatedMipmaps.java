@@ -129,10 +129,22 @@ public final class AnimatedMipmaps {
 	 * -- is left alone, because the per-tile filter is only valid inside a tile.
 	 */
 	private static boolean isWholeTile(int name, int x, int y, int width, int height) {
-		if (!BlockAtlas.isBlockAtlas(name) || !BlockAtlas.uniformGrid()) {
+		if (!BlockAtlas.isBlockAtlas(name)) {
 			return false;
 		}
-		int tile = BlockAtlas.tileTexels();
-		return tile > 1 && width == tile && height == tile && x % tile == 0 && y % tile == 0;
+		if (BlockAtlas.uniformGrid()) {
+			int tile = BlockAtlas.tileTexels();
+			return tile > 1 && width == tile && height == tile && x % tile == 0 && y % tile == 0;
+		}
+		// Stitched: the boundary is the SPRITE the upload lands in rather than a grid cell. Same
+		// question either way -- does this sub-image cover exactly one whole texture -- and without it
+		// an animated sprite would keep re-uploading level 0 and leave its mips frozen at whatever
+		// frame the atlas was built with.
+		BlockAtlas.SpriteGrid grid = BlockAtlas.spriteGrid();
+		if (grid == null) {
+			return false;
+		}
+		int size = grid.sizeAtTexel(x, y);
+		return size > 1 && width == size && height == size && x % size == 0 && y % size == 0;
 	}
 }

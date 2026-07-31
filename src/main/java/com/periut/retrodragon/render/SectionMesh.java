@@ -5,6 +5,7 @@ import java.nio.ByteOrder;
 
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15;
+import org.lwjgl.opengl.GL20;
 
 /**
  * One section layer's geometry, living in a GPU buffer instead of a display list.
@@ -135,6 +136,15 @@ public final class SectionMesh {
 		GL11.glTexCoordPointer(2, GL11.GL_FLOAT, VertexSink.STRIDE_BYTES, 12L);
 		GL11.glColorPointer(4, GL11.GL_UNSIGNED_BYTE, VertexSink.STRIDE_BYTES, 20L);
 		GL11.glNormalPointer(GL11.GL_BYTE, VertexSink.STRIDE_BYTES, 24L);
+		if (TerrainVertex.spriteClamp() && TerrainShader.isActive()) {
+			// Beta's pad word, which nothing else reads -- so the stitched-atlas pitch rides along in
+			// the legacy layout for free. NOT normalised: the shader wants texels (16, 32), not 0..1.
+			// A generic attribute rather than a second texture coordinate, because fixed-function
+			// glTexCoordPointer cannot deliver an unnormalised integer and this one can.
+			GL20.glEnableVertexAttribArray(TerrainShader.SPRITE_ATTRIB);
+			GL20.glVertexAttribPointer(TerrainShader.SPRITE_ATTRIB, 1, GL11.GL_UNSIGNED_BYTE, false,
+				VertexSink.STRIDE_BYTES, TerrainVertex.spriteOffset(false));
+		}
 		GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, this.vertexCount);
 	}
 

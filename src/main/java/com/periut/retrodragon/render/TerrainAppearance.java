@@ -84,6 +84,6 @@ public final class TerrainAppearance {
 	 * per-tile clamp, so without a grid RGSS would smear one sprite into the next.
 	 */
 	public static float rgss() {
-		return enabled() && Config.RGSS && BlockAtlas.uniformGrid() ? 1.0F : 0.0F;
+		return enabled() && Config.RGSS && BlockAtlas.clamped() ? 1.0F : 0.0F;
 	}
 }

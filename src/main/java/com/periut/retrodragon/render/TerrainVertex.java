@@ -70,6 +70,19 @@ public final class TerrainVertex {
 	public static final int LEGACY_STRIDE = 32;
 	/** Normal dropped, texture coordinate to unorm16. */
 	public static final int COMPACT_STRIDE = 20;
+	/** Compact plus the sprite size a stitched atlas needs; see {@link #spriteClamp()}. */
+	public static final int SPRITE_STRIDE = 24;
+
+	/**
+	 * Byte offset of the sprite size within a vertex.
+	 *
+	 * <p>The legacy layout gets it for FREE: beta's 32-byte vertex ends in a pad word that nothing
+	 * reads, so the byte lands there and the stride does not move. Only the compact layout, which has
+	 * no slack by construction, grows -- and only when a stitched atlas is what is installed.
+	 */
+	public static int spriteOffset(boolean compact) {
+		return compact ? 20 : 28;
+	}
 
 	/**
 	 * {@code -Dretroperf.compactTerrain=false} reverts to the 32-byte layout on both backends.
@@ -82,8 +95,27 @@ public final class TerrainVertex {
 		!"false".equalsIgnoreCase(System.getProperty("retroperf.compactTerrain"));
 
 	private static boolean resolved;
+	private static boolean sprite;
 
 	private TerrainVertex() {
+	}
+
+	/**
+	 * Whether every terrain vertex carries the edge length of the sprite it samples.
+	 *
+	 * <p>Needed only for a STITCHED atlas, where sprites are packed at mixed sizes and no single grid
+	 * pitch describes the sheet. {@code TextureStitcher} places a sprite of size S at a multiple of S,
+	 * so the size alone recovers the origin -- {@code floor(uv / S) * S} -- and both terrain shaders
+	 * then run their existing tile maths with a per-quad pitch. See {@link BlockAtlas.SpriteGrid}.
+	 *
+	 * <p>Decided from whether StationAPI is INSTALLED rather than from the atlas it produces, because
+	 * this fixes a vertex layout and the layout has to be settled before anything meshes -- which is
+	 * long before the first resource reload has stitched anything. Vanilla, an HD pack and RetroAPI
+	 * are all uniform grids by construction and never pay for it: RetroAPI composites at a fixed
+	 * sprite size and publishes it, so its sheet gains ROWS, not sprite sizes.
+	 */
+	public static boolean spriteClamp() {
+		return sprite;
 	}
 
 	/**
@@ -99,6 +131,13 @@ public final class TerrainVertex {
 	 */
 	public static void select(boolean webgpu) {
 		resolved = COMPACT && webgpu;
+		sprite = BlockAtlas.mayStitch();
+	}
+
+	/** Test seam: fixes both halves of the layout without a backend or a content API. */
+	static void select(boolean webgpu, boolean spriteClamp) {
+		resolved = COMPACT && webgpu;
+		sprite = spriteClamp;
 	}
 
 	/** Whether terrain buffers are packed compactly, which only the WebGPU backend can consume. */
@@ -106,9 +145,17 @@ public final class TerrainVertex {
 		return resolved;
 	}
 
-	/** Bytes per terrain vertex under the layout {@code compact} selects. */
+	/**
+	 * Bytes per terrain vertex under the layout {@code compact} selects.
+	 *
+	 * <p>Only the compact layout grows for the sprite size; the legacy one already had a pad word to
+	 * put it in. See {@link #spriteOffset}.
+	 */
 	public static int stride(boolean compact) {
-		return compact ? COMPACT_STRIDE : LEGACY_STRIDE;
+		if (!compact) {
+			return LEGACY_STRIDE;
+		}
+		return sprite ? SPRITE_STRIDE : COMPACT_STRIDE;
 	}
 
 	/** Ints per terrain vertex; both strides are a whole number of them. */

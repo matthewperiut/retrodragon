@@ -125,7 +125,7 @@ public final class TextureStore implements AutoCloseable {
 			int a = rgba.get(base + i * 4 + 3) & 0xFF;
 			argb[i] = a << 24 | r << 16 | g << 8 | b;
 		}
-		int[][] chain = Mipmapper.build(argb, width, height, BlockAtlas.tileTexels(),
+		int[][] chain = Mipmapper.build(argb, width, height, BlockAtlas.filterPitch(),
 			texture.mipLevels() - 1);
 		ByteBuffer scratch = null;
 		int size = width;
