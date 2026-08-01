@@ -37,21 +37,69 @@ public final class PostProcess {
 
 	private static boolean broken;
 	private static boolean active;
+	/**
+	 * The window size, which is where {@link #resolve} draws TO.
+	 *
+	 * <p>Distinct from {@link #width}/{@link #height} as soon as render scale is in play: those are
+	 * the offscreen target's size and this is the drawable's. They were the same number before, which
+	 * is why the resolve used to set its viewport from the target.
+	 */
+	private static int outWidth;
+	private static int outHeight;
+	/** True when this frame's offscreen exists because of render scale rather than FXAA. */
+	private static boolean scaled;
 
 	private PostProcess() {
 	}
 
 	/** @return true if the caller must call {@link #resolve}. */
 	public static boolean begin(int frameWidth, int frameHeight) {
-		if (broken || !Config.FXAA || frameWidth <= 0 || frameHeight <= 0) {
+		if (broken || frameWidth <= 0 || frameHeight <= 0) {
 			return false;
 		}
-		if (!ensureTarget(frameWidth, frameHeight) || !ensureProgram()) {
+		// Two reasons to render offscreen now, and either is sufficient. Render scale needs it even
+		// with FXAA off, because that is the only way the world can be a different size from the HUD.
+		boolean wantScale = RenderScale.active();
+		if (!Config.FXAA && !wantScale) {
 			return false;
 		}
+		int targetWidth = wantScale ? RenderScale.worldWidth() : frameWidth;
+		int targetHeight = wantScale ? RenderScale.worldHeight() : frameHeight;
+		if (!ensureTarget(targetWidth, targetHeight)) {
+			return false;
+		}
+		// The FXAA program is only needed when FXAA is actually going to run. Under render scale the
+		// resolve is ScaleResolve's, and demanding a working FXAA program to get there would let a
+		// broken FXAA shader disable render scale for no reason.
+		if (Config.FXAA && !ensureProgram()) {
+			if (!wantScale) {
+				return false;
+			}
+		}
+		outWidth = frameWidth;
+		outHeight = frameHeight;
+		scaled = wantScale;
 		GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+		// The world pass has to fill the TARGET, not the window. beta sets the viewport from
+		// displayWidth/displayHeight and would otherwise render at window size into a smaller
+		// attachment, clipping the frame to a corner; WorldViewportMixin rewrites those calls, and
+		// this covers the span before the first of them.
+		GL11.glViewport(0, 0, width, height);
 		active = true;
 		return true;
+	}
+
+	/** The size the world is currently being rendered at, for the viewport redirect. 0 when inactive. */
+	public static int targetWidth() {
+		return active ? width : 0;
+	}
+
+	public static int targetHeight() {
+		return active ? height : 0;
+	}
+
+	public static boolean isActive() {
+		return active;
 	}
 
 	public static void resolve() {
@@ -79,7 +127,9 @@ public final class PostProcess {
 		GL11.glDisable(GL11.GL_CULL_FACE);
 		GL11.glColorMask(true, true, true, true);
 		GL11.glDepthMask(false);
-		GL11.glViewport(0, 0, width, height);
+		// The WINDOW, not the target. Under render scale these differ, and it is this viewport that
+		// turns the smaller world image back into a full-screen one.
+		GL11.glViewport(0, 0, outWidth, outHeight);
 
 		GL11.glMatrixMode(GL11.GL_PROJECTION);
 		GL11.glPushMatrix();
@@ -89,27 +139,37 @@ public final class PostProcess {
 		GL11.glPushMatrix();
 		GL11.glLoadIdentity();
 
-		GL13.glActiveTexture(GL13.GL_TEXTURE0);
-		GL11.glEnable(GL11.GL_TEXTURE_2D);
-		GL11.glBindTexture(GL11.GL_TEXTURE_2D, colorTexture);
+		if (scaled) {
+			// Render scale owns the resolve: it is the pass that changes resolution, so it is the one
+			// that gets to choose the filter. FXAA is skipped for this frame rather than chained,
+			// because a second full-screen pass to sharpen an image that is about to be resampled
+			// anyway costs a target and buys very little -- and the resample filters that matter here
+			// (FSR1's RCAS, bicubic's negative lobes) already do their own edge handling.
+			ScaleResolve.draw(colorTexture, width, height, outWidth, outHeight,
+				RenderScale.effectiveFilter());
+		} else {
+			GL13.glActiveTexture(GL13.GL_TEXTURE0);
+			GL11.glEnable(GL11.GL_TEXTURE_2D);
+			GL11.glBindTexture(GL11.GL_TEXTURE_2D, colorTexture);
 
-		GL20.glUseProgram(program);
-		GL20.glUniform2f(uRcpFrame, 1.0F / width, 1.0F / height);
-		GL20.glUniform1f(uThreshold, Config.FXAA_THRESHOLD);
-		GL20.glUniform1f(uThresholdMin, Config.FXAA_THRESHOLD_MIN);
+			GL20.glUseProgram(program);
+			GL20.glUniform2f(uRcpFrame, 1.0F / width, 1.0F / height);
+			GL20.glUniform1f(uThreshold, Config.FXAA_THRESHOLD);
+			GL20.glUniform1f(uThresholdMin, Config.FXAA_THRESHOLD_MIN);
 
-		GL11.glBegin(GL11.GL_QUADS);
-		GL11.glTexCoord2f(0.0F, 0.0F);
-		GL11.glVertex2f(0.0F, 0.0F);
-		GL11.glTexCoord2f(1.0F, 0.0F);
-		GL11.glVertex2f(1.0F, 0.0F);
-		GL11.glTexCoord2f(1.0F, 1.0F);
-		GL11.glVertex2f(1.0F, 1.0F);
-		GL11.glTexCoord2f(0.0F, 1.0F);
-		GL11.glVertex2f(0.0F, 1.0F);
-		GL11.glEnd();
+			GL11.glBegin(GL11.GL_QUADS);
+			GL11.glTexCoord2f(0.0F, 0.0F);
+			GL11.glVertex2f(0.0F, 0.0F);
+			GL11.glTexCoord2f(1.0F, 0.0F);
+			GL11.glVertex2f(1.0F, 0.0F);
+			GL11.glTexCoord2f(1.0F, 1.0F);
+			GL11.glVertex2f(1.0F, 1.0F);
+			GL11.glTexCoord2f(0.0F, 1.0F);
+			GL11.glVertex2f(0.0F, 1.0F);
+			GL11.glEnd();
 
-		GL20.glUseProgram(0);
+			GL20.glUseProgram(0);
+		}
 
 		GL11.glMatrixMode(GL11.GL_PROJECTION);
 		GL11.glPopMatrix();
@@ -156,7 +216,7 @@ public final class PostProcess {
 			broken = true;
 			return false;
 		}
-		RetroDragon.detail("FXAA enabled at {}x{}", width, height);
+		RetroDragon.detail("offscreen world target at {}x{}", width, height);
 		return true;
 	}
 

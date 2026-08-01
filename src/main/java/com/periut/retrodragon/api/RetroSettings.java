@@ -4,6 +4,7 @@ import com.periut.retrodragon.Config;
 import com.periut.retrodragon.RetroDragon;
 import com.periut.retrodragon.render.Capture;
 import com.periut.retrodragon.render.GameOptions;
+import com.periut.retrodragon.render.RenderScale;
 
 import net.minecraft.client.Minecraft;
 
@@ -178,6 +179,78 @@ public final class RetroSettings {
 				reuploadTerrain();
 			}
 		}
+	}
+
+	// --- render scale -----------------------------------------------------------------------------
+
+	/**
+	 * The world's render resolution as a multiple of the window's LOGICAL size.
+	 *
+	 * <p>1.0 means 854x480 on a default window, on every machine, whatever the display's scale factor
+	 * is. Retina is folded in rather than being a second setting: a HiDPI window is simply scale 2.0,
+	 * and the default is seeded from the window's pixels-per-point so an untouched install renders
+	 * exactly what it did before this existed.
+	 *
+	 * <p>Only the WORLD scales. The HUD, text and any open screen stay at the drawable's native
+	 * resolution, which is the point of doing it this way instead of scaling the whole frame.
+	 */
+	public static float getRenderScale() {
+		return RenderScale.scale();
+	}
+
+	/**
+	 * Sets the world render scale.
+	 *
+	 * <p>Clamped to {@code [0.1, 4.0]}; the value actually adopted is returned, so a caller can tell
+	 * whether it got what it asked for without re-reading. Safe from any thread -- the render path
+	 * reads it once per frame and resizes its target when it changes.
+	 *
+	 * @return the scale in force after the call
+	 */
+	public static float setRenderScale(float scale) {
+		return RenderScale.setScale(scale);
+	}
+
+	/**
+	 * The filter used to resolve the world target back to the window. Never null.
+	 *
+	 * <p>Names, not an enum, deliberately: a mod compiled against {@code "bicubic"} keeps working when
+	 * a new technique is added, and this API is meant to be reachable by reflection.
+	 */
+	public static String getScaleFilter() {
+		return RenderScale.filter();
+	}
+
+	/**
+	 * Sets the resolve filter by name.
+	 *
+	 * <p>An unknown or unavailable name logs and falls back rather than throwing: this is called from
+	 * another mod, and a bad string there should not take the game down.
+	 *
+	 * @return the filter in force after the call, which may not be the one requested
+	 */
+	public static String setScaleFilter(String name) {
+		return RenderScale.setFilter(name);
+	}
+
+	/**
+	 * The filters this run can actually use, for the given direction.
+	 *
+	 * <p><b>Ask, do not assume.</b> Availability is not fixed: {@code "metalfx-spatial"} needs macOS
+	 * and the WebGPU backend, and the upsamplers ({@code "fsr1"}, {@code "metalfx-spatial"},
+	 * {@code "integer"}) are not offered above 1.0, where the job is reconstructing a downsample
+	 * rather than inventing detail. Hardcoding a list in the caller is the thing that rots.
+	 *
+	 * @param upscale true for the filters that apply when the world target is smaller than the window
+	 *     (scale below 1.0), false for the supersampling direction
+	 */
+	public static String[] getAvailableScaleFilters(boolean upscale) {
+		return RenderScale.availableFilters(upscale);
+	}
+
+	/** Whether the world is currently rendered at a different size from the window at all. */
+	public static boolean isRenderScaleActive() {
+		return RenderScale.active();
 	}
 
 	private static void reuploadTerrain() {

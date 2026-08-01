@@ -22,6 +22,7 @@
     "WorldCollisionLockMixin",
     "FocusMixin",
     "AntiAliasMixin",
+    "WorldViewportMixin",
     "MipmapCompletenessMixin",
     "FogModeMixin",
     "GlOwnershipMixin",

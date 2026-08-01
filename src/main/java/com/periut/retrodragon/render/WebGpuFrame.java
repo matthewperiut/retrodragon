@@ -7,6 +7,7 @@ import com.periut.retrodragon.shim.GlShim;
 import com.periut.retrodragon.shim.ShimTracker;
 import com.periut.retrodragon.window.sdl.Sdl3Window;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 
@@ -48,6 +49,117 @@ public final class WebGpuFrame {
 	private static ImmediateRenderer immediate;
 	private static TextureStore textures;
 	private static ShaderTargets shaderTargets;
+
+	// --- render scale -----------------------------------------------------------------------------
+	//
+	// The world's own colour and depth when it is not being rendered at the swapchain's size, plus the
+	// pass that resamples it back. Allocated on first use and reallocated whenever the scale or the
+	// window changes, which is why they are not part of the renderer's resize: the scale can change
+	// without the window doing so.
+
+	private static com.periut.retrodragon.gpu.RenderTarget scaleTarget;
+	private static com.periut.retrodragon.gpu.DepthBuffer scaleDepth;
+	private static ScaleBlit scaleBlit;
+	/** Its own arena, because these are freed and rebuilt on a scale change and the renderer's is not. */
+	private static Arena scaleArena;
+	private static int scaleWidth;
+	private static int scaleHeight;
+	private static boolean scaleBroken;
+
+	/**
+	 * Makes the scaled world target match the current scale and window. Fails soft.
+	 *
+	 * @return true when the caller may use {@link #scaleTarget}; false disables render scale for the
+	 *     session and the frame falls through to the ordinary full-resolution path, which is a
+	 *     resolution the player did not ask for but is emphatically better than a black screen
+	 */
+	private static void syncScaleTargets() {
+		if (scaleBroken || renderer == null) {
+			return;
+		}
+		if (!RenderScale.active()) {
+			// Scale turned off, or the window caught up with it. Release rather than keep a
+			// full-resolution target alive for a path that will not use it again.
+			if (scaleTarget != null) {
+				GpuBackend.context().drain(2000);
+				freeScaleTargets();
+			}
+			return;
+		}
+		ensureScaleTargets();
+	}
+
+	/**
+	 * Whether the scaled target exists AND matches what this frame is about to draw.
+	 *
+	 * <p>Read-only, and called from inside the frame. It allocates nothing: {@link #syncScaleTargets}
+	 * has already run before the drawable was acquired, so by here the answer is either yes or this
+	 * frame renders at full resolution.
+	 */
+	private static boolean scaleTargetsReady() {
+		return !scaleBroken && scaleTarget != null && scaleBlit != null
+			&& scaleWidth == RenderScale.worldWidth() && scaleHeight == RenderScale.worldHeight()
+			&& scaleBlit.matches(renderer.surfaceFormat());
+	}
+
+	private static boolean ensureScaleTargets() {
+		if (scaleBroken) {
+			return false;
+		}
+		int width = RenderScale.worldWidth();
+		int height = RenderScale.worldHeight();
+		int format = renderer.surfaceFormat();
+		if (scaleTarget != null && width == scaleWidth && height == scaleHeight
+				&& scaleBlit != null && scaleBlit.matches(format)) {
+			return true;
+		}
+		try {
+			// The GPU may still be reading last frame's target. Everything below releases textures the
+			// in-flight frames reference, and releasing those underneath live work is the hazard the
+			// whole teardown ordering in this renderer exists to avoid.
+			GpuBackend.context().drain(2000);
+			freeScaleTargets();
+			scaleArena = Arena.ofShared();
+			scaleWidth = width;
+			scaleHeight = height;
+			// The swapchain's format, so the resolve pipeline's single colour target matches and no
+			// conversion is needed on the way out.
+			scaleTarget = com.periut.retrodragon.gpu.RenderTarget.create(
+				GpuBackend.context(), scaleArena, width, height, format);
+			scaleDepth = com.periut.retrodragon.gpu.DepthBuffer.create(
+				GpuBackend.context(), scaleArena, width, height);
+			scaleBlit = ScaleBlit.create(GpuBackend.context(), scaleArena, format);
+			RetroDragon.LOGGER.info("render scale: world at {}x{} ({}x window), filter {}",
+				width, height, RenderScale.scale(), RenderScale.effectiveFilter());
+			return true;
+		} catch (RuntimeException e) {
+			RetroDragon.LOGGER.error("render scale could not be set up; rendering at window size", e);
+			freeScaleTargets();
+			scaleBroken = true;
+			return false;
+		}
+	}
+
+	private static void freeScaleTargets() {
+		if (scaleBlit != null) {
+			scaleBlit.close();
+			scaleBlit = null;
+		}
+		if (scaleDepth != null) {
+			scaleDepth.close();
+			scaleDepth = null;
+		}
+		if (scaleTarget != null) {
+			scaleTarget.close();
+			scaleTarget = null;
+		}
+		if (scaleArena != null) {
+			scaleArena.close();
+			scaleArena = null;
+		}
+		scaleWidth = 0;
+		scaleHeight = 0;
+	}
 	private static ShadowMap shadowMap;
 	private static com.periut.retrodragon.api.ShaderResources shaderResources;
 	private static volatile boolean initialized;
@@ -574,6 +686,16 @@ public final class WebGpuFrame {
 			startExtensions(GpuBackend.context());
 		}
 		renderer.syncPresentMode();
+		// BEFORE beginFrame, and that ordering is the whole point.
+		//
+		// This can drain the GPU and free and reallocate textures. Doing either after beginFrame means
+		// doing it while a swapchain drawable is acquired and unpresented, and blocking for up to two
+		// seconds in that state starves the compositor of drawables -- which on macOS does not stall
+		// the game, it takes the window server down with it. A fullscreen transition is exactly when
+		// it fires: the size changes, so beginFrame already drained and reconfigured the surface once,
+		// and this drained again on top of it holding the drawable that reconfigure had just handed
+		// out. Up here nothing has been acquired, which is the same reason resize() is safe.
+		syncScaleTargets();
 		if (!renderer.beginFrame()) {
 			// No backbuffer this frame (minimised, or mid-resize). The recorded draws are dropped
 			// rather than held: they describe a frame at the old size, and beta will redraw.
@@ -647,6 +769,31 @@ public final class WebGpuFrame {
 
 		int worldEnd = LIST.firstNonWorldBatch(0);
 		int deferredAt = Math.min(LIST.firstTranslucentBatch(0), worldEnd);
+
+		// Render scale, on the ordinary path: the world range goes into a target of its own size and
+		// is resampled onto the swapchain before the GUI range is drawn over it at full resolution.
+		//
+		// No viewport work is needed here, unlike the GL backend. This renderer never calls
+		// SetViewport at all -- a pass covers its whole attachment, so NDC lands on whatever size the
+		// target is, and a uniform scale leaves the projection's aspect untouched.
+		//
+		// Deliberately NOT combined with a shader extension's world redirect (handled below). There
+		// the extension owns the world target and its composite writes the swapchain, so scaling would
+		// mean resampling either its input or its output, and which of those is right is the
+		// extension's business rather than something to guess at here.
+		if (RenderScale.active() && worldEnd > 0 && !redirected && scaleTargetsReady()) {
+			String filter = RenderScale.effectiveFilter();
+			int sw = scaleTarget.width();
+			int sh = scaleTarget.height();
+
+			immediate.render(renderer.frame(), scaleTarget.view(), NO_AUX, scaleDepth.view(),
+				LIST, 0, worldEnd, pipelines, textures, MemorySegment.NULL);
+			scaleBlit.draw(renderer.frame(), renderer.colorView(), scaleTarget.view(),
+				sw, sh, renderer.width(), renderer.height(), filter);
+			return immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
+				renderer.depthView(), LIST, worldEnd, LIST.batchCount(), pipelines, textures,
+				MemorySegment.NULL);
+		}
 
 		// No extension, or NO WORLD THIS FRAME: one upload, one range, straight to the swapchain --
 		// byte for byte the path the engine takes with no shader mod installed at all.
@@ -934,6 +1081,9 @@ public final class WebGpuFrame {
 		// device, and releasing the surface out from under work that still references them is the
 		// hazard the whole teardown order exists to avoid.
 		com.periut.retrodragon.api.ShaderApi.stopAll();
+		// Before the renderer: these hold textures created from the same device, and the drain that
+		// guards this whole sequence has already run.
+		freeScaleTargets();
 		releaseExtensionResources();
 		extensionsStarted = false;
 		if (renderer != null) {

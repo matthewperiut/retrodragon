@@ -412,9 +412,24 @@ public final class Sdl3Window {
 	 * to prevent that would be held on the frame path against the event pump, which is the coupling
 	 * this whole change exists to remove.
 	 */
-	private static volatile int pixelWidth;
-	private static volatile int pixelHeight;
-	private static volatile float pixelsPerPoint = 1.0F;
+	/**
+	 * The three published as ONE object, so a reader cannot see a mix of old and new.
+	 *
+	 * <p>They were three separate volatiles, and the tearing that allows is not theoretical. Anything
+	 * deriving a size from more than one of them -- {@code RenderScale.logicalWidth} divides the
+	 * drawable by the density -- can catch a new width against an old density during a fullscreen
+	 * transition, where both change at once and thread 0 writes them a few instructions apart. The
+	 * quotient is then wrong by the ratio between the two states, and the number it produces is used
+	 * to ALLOCATE A GPU TEXTURE. A momentary factor-of-two error there is a wasted allocation; a
+	 * factor of the fullscreen jump is an allocation the driver may not survive.
+	 *
+	 * <p>One immutable record behind one volatile reference costs an allocation per resize, which is
+	 * an event measured in tens per session.
+	 */
+	private record Metrics(int width, int height, float pixelsPerPoint) {
+	}
+
+	private static volatile Metrics metrics = new Metrics(0, 0, 1.0F);
 
 	/**
 	 * Re-reads the window's pixel size and scale from SDL. <b>Thread 0 only.</b>
@@ -443,13 +458,16 @@ public final class Sdl3Window {
 			// A zero here means the window is minimised or being torn down. Keeping the last good size
 			// is better than publishing 0: the renderer clamps to 1x1 and would reconfigure the
 			// swapchain twice for nothing on every minimise.
-			if (px > 0 && py > 0) {
-				pixelWidth = px;
-				pixelHeight = py;
-			}
-			if (logical > 0 && px > 0) {
-				pixelsPerPoint = (float) px / logical;
-			}
+			// Published as one object; see Metrics. Anything not readable this time keeps its
+			// previous value rather than being zeroed, which is what makes a minimised window keep
+			// its last good size instead of reporting 0.
+			Metrics previous = metrics;
+			int newWidth = px > 0 ? px : previous.width();
+			int newHeight = py > 0 ? py : previous.height();
+			float newDensity = (logical > 0 && px > 0)
+				? (float) px / logical
+				: previous.pixelsPerPoint();
+			metrics = new Metrics(newWidth, newHeight, newDensity);
 		}
 	}
 
@@ -459,11 +477,24 @@ public final class Sdl3Window {
 	 * made the whole frame render at 1x1.
 	 */
 	public static int width() {
-		return pixelWidth;
+		return metrics.width();
 	}
 
 	public static int height() {
-		return pixelHeight;
+		return metrics.height();
+	}
+
+	/**
+	 * The drawable size and its density, read as ONE consistent triple.
+	 *
+	 * <p>For callers that derive a size from more than one of them. Reading {@link #width()} and
+	 * {@link #pixelsPerPoint()} separately can straddle a resize; this cannot.
+	 *
+	 * @return {@code [width, height, pixelsPerPoint]}
+	 */
+	public static float[] metricsSnapshot() {
+		Metrics current = metrics;
+		return new float[] { current.width(), current.height(), current.pixelsPerPoint() };
 	}
 
 	/**
@@ -473,7 +504,7 @@ public final class Sdl3Window {
 	 * coordinate has to be multiplied by this before beta sees it.
 	 */
 	public static float pixelsPerPoint() {
-		return window == 0L ? 1.0F : pixelsPerPoint;
+		return window == 0L ? 1.0F : metrics.pixelsPerPoint();
 	}
 
 	/**
@@ -717,9 +748,7 @@ public final class Sdl3Window {
 			if (window != 0L) {
 				SDLVideo.SDL_DestroyWindow(window);
 				window = 0L;
-				pixelWidth = 0;
-				pixelHeight = 0;
-				pixelsPerPoint = 1.0F;
+				metrics = new Metrics(0, 0, 1.0F);
 			}
 			if (initialized) {
 				SDLInit.SDL_Quit();

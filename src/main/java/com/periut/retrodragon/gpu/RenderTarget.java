@@ -56,8 +56,13 @@ public final class RenderTarget implements AutoCloseable {
 		// drawn, and usage cannot be widened after creation.
 		// CopyDst as well: this doubles as the "last presented frame" that glReadPixels reads, which
 		// means the swapchain image gets copied INTO it once a frame. Usage cannot be widened later.
+		// TextureBinding as well: render scale RESAMPLES this target rather than copying it, and a
+		// filtered resample is a shader reading it as a texture. Usage cannot be widened after
+		// creation, so it is cheaper to ask for it here than to grow a second target type for the one
+		// case that needs to sample.
 		WGPUTextureDescriptor.usage(desc, Flags.TEXTURE_USAGE_RENDER_ATTACHMENT
-			| Flags.TEXTURE_USAGE_COPY_SRC | Flags.TEXTURE_USAGE_COPY_DST);
+			| Flags.TEXTURE_USAGE_COPY_SRC | Flags.TEXTURE_USAGE_COPY_DST
+			| Flags.TEXTURE_USAGE_TEXTURE_BINDING);
 		WGPUTextureDescriptor.dimension(desc, WGPUTextureDimension_2D());
 		WGPUTextureDescriptor.format(desc, format);
 		WGPUTextureDescriptor.mipLevelCount(desc, 1);
