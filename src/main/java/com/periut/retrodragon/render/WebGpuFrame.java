@@ -894,12 +894,42 @@ public final class WebGpuFrame {
 		return pipelines == null ? 0 : pipelines.builtCount();
 	}
 
+	/**
+	 * How long teardown waits for the GPU to retire everything before it starts releasing.
+	 *
+	 * <p>Longer than the mid-game reconfigure budget, because the two are answering different
+	 * questions. A resize that waits too long drops a frame; this one runs once, while the player is
+	 * already looking at a closing window, and what it is buying is the difference between a clean
+	 * exit and a compositor that has to be rebooted out of.
+	 */
+	private static final long TEARDOWN_DRAIN_MILLIS =
+		Long.getLong("retroperf.teardownDrainMillis", 5000L);
+
 	public static synchronized void shutdown() {
 		// Stop accepting work first. The game keeps issuing GL calls while it shuts down -- saving a
 		// world draws a progress screen -- and a capture into a half-released renderer is a crash
 		// during the one operation that must not crash.
 		initialized = false;
 		failed = true;
+		// THE GPU GOES QUIET BEFORE ANYTHING IS RELEASED, and if it will not, nothing is released.
+		//
+		// This is one decision for the whole teardown rather than a check inside each step, because
+		// every step below frees something that in-flight work may still be reading: the extensions'
+		// textures and buffers, the renderer's depth and offscreen targets, the surface itself, then
+		// the immediate-mode buffers, the texture store and the pipeline caches. Draining inside
+		// renderer.close() alone left the other seven releasing regardless.
+		//
+		// The bail-out leaks all of it on purpose. This runs on the way out of the process, so the
+		// leak lives for milliseconds and then the OS takes it; releasing a texture out from under a
+		// command buffer that is still executing leaves the macOS render server holding a reference
+		// to a destroyed object, and that outlives the process by however long it takes to reboot.
+		com.periut.retrodragon.gpu.WebGPUContext ctx = GpuBackend.context();
+		if (ctx != null && !ctx.drain(TEARDOWN_DRAIN_MILLIS)) {
+			RetroDragon.LOGGER.error("GPU did not drain within {} ms at shutdown ({} frame(s) still"
+				+ " in flight); skipping GPU teardown entirely and letting the process exit take it."
+				+ " Nothing is released under live work.", TEARDOWN_DRAIN_MILLIS, ctx.framesInFlight());
+			return;
+		}
 		// Extensions first, and before the renderer: they hold GPU objects created from the same
 		// device, and releasing the surface out from under work that still references them is the
 		// hazard the whole teardown order exists to avoid.

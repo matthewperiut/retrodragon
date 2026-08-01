@@ -98,10 +98,23 @@ public final class Sdl3Events {
 				closeRequested = true;
 			case SDLEvents.SDL_EVENT_WINDOW_FOCUS_GAINED -> focused = true;
 			case SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST -> focused = false;
+			// Anything that can change the framebuffer's PIXEL size. The last three matter on macOS
+			// and are why this list is not just RESIZED: dragging a window from a 1x display onto a
+			// Retina one leaves the window the same size in POINTS, so RESIZED may never fire, while
+			// the drawable the renderer has to match doubles in both axes.
 			case SDLEvents.SDL_EVENT_WINDOW_RESIZED,
-				SDLEvents.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED -> {
-				width = event.window().data1();
-				height = event.window().data2();
+				SDLEvents.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+				SDLEvents.SDL_EVENT_WINDOW_METAL_VIEW_RESIZED,
+				SDLEvents.SDL_EVENT_WINDOW_DISPLAY_CHANGED,
+				SDLEvents.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED -> {
+				// Deliberately NOT event.window().data1()/data2(). Those two fields carry different
+				// units per event type -- RESIZED reports logical points, PIXEL_SIZE_CHANGED reports
+				// pixels, and DISPLAY_CHANGED reports a display ID in data1 and nothing in data2 --
+				// so reading them into one pair of fields mixed three coordinate spaces into one.
+				// Asking the window is unambiguous, and this is the one thread allowed to ask.
+				Sdl3Window.refreshSize();
+				width = Sdl3Window.width();
+				height = Sdl3Window.height();
 				resized = true;
 			}
 			// The user flipped the OS between light and dark. Windows is the only place we act

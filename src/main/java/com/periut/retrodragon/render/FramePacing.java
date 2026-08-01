@@ -28,7 +28,13 @@ import static com.periut.webgpu.webgpu_h.*;
 public final class FramePacing {
 	/** Beta's {@code PERFORMANCE_KEYS} order: max, balanced, powersaver. */
 	private static final int MAX_FPS = 0;
-	private static final int BALANCED = 1;
+	/**
+	 * Public because it is also the value {@code GameOptionsMixin} seeds a fresh options.txt with, and
+	 * the table above is where "what Balanced means" is written down. A compile-time constant, so
+	 * naming it from the mixin does not pull this class (or the WebGPU bindings it imports) into
+	 * options loading.
+	 */
+	public static final int BALANCED = 1;
 	private static final int POWER_SAVER = 2;
 
 	private static final long POWER_SAVER_FPS = 60L;

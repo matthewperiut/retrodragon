@@ -113,6 +113,13 @@ public final class Surface implements AutoCloseable {
 	 *                          WebGPU guarantees, when the surface does not support it
 	 */
 	public void configure(Arena arena, int width, int height, int wantedPresentMode) {
+		// Configuring replaces the swapchain, so a backbuffer acquired from the OLD one must go back
+		// first -- releasing it afterwards returns it to a swapchain that no longer exists, which is
+		// the leaked-drawable hazard that wedges the macOS compositor rather than merely leaking.
+		// No caller currently reconfigures with a drawable outstanding (WebGpuRenderer resizes before
+		// it acquires), but that is an ordering rule in another class and this is where it is cheap to
+		// make unconditional.
+		releaseCurrent();
 		this.width = Math.max(1, width);
 		this.height = Math.max(1, height);
 
@@ -315,6 +322,22 @@ public final class Surface implements AutoCloseable {
 		return height;
 	}
 
+	/**
+	 * Releases the swapchain and the surface.
+	 *
+	 * <p><b>Two preconditions, and both have cost a hung desktop rather than a crash.</b>
+	 *
+	 * <p>First, the GPU must be idle. Unconfiguring hands the drawable pool back; doing that while
+	 * submitted work is still executing leaves the compositor holding a reference to something being
+	 * destroyed. {@code WebGpuFrame.shutdown} drains before it calls anything on this path, and
+	 * abandons the whole teardown rather than proceed if the drain fails.
+	 *
+	 * <p>Second, on macOS this must run on thread 0. Both calls below reach into the window's
+	 * {@code CAMetalLayer}, and thread 0 is running AppKit against that same layer on its idle pump
+	 * until the window is destroyed. {@code WebGpuRenderer.close} marshals accordingly -- this class
+	 * has no window dependency to do it itself, which is the same division of labour that puts
+	 * {@code WindowSurface} rather than this class in charge of construction.
+	 */
 	@Override
 	public void close() {
 		releaseCurrent();

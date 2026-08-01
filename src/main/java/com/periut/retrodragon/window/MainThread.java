@@ -65,6 +65,21 @@ public final class MainThread {
 		}
 	}
 
+	/**
+	 * Stops thread 0's idle work. Call before the thing the idle task touches goes away.
+	 *
+	 * <p>The idle task is {@code SDL_PumpEvents}, and thread 0 runs it on every pass of its drain loop
+	 * for as long as the game thread is alive -- which includes every pass AFTER {@code SDL_Quit} has
+	 * torn the video subsystem down. There is no {@code put(key, null)} for this: {@link System#getProperties()}
+	 * is a Hashtable and rejects null values, which is why clearing needs a method of its own rather
+	 * than a null argument to {@link #setIdleTask}.
+	 */
+	public static void clearIdleTask() {
+		if (available()) {
+			System.getProperties().remove(IDLE_KEY);
+		}
+	}
+
 	/** Runs {@code task} on thread 0 and blocks until it finishes, propagating any exception. */
 	public static void run(Runnable task) {
 		if (!available() || onMainThread()) {

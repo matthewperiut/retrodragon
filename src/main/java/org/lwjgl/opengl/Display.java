@@ -1044,11 +1044,17 @@ public final class Display {
 				// Fullscreen transitions are asynchronous in SDL3; without this the very next
 				// SDL_GetWindowSizeInPixels still reports the old geometry.
 				SDLVideo.SDL_SyncWindow(window);
+				// Now that the geometry has settled, refresh the size cache. SDL_SyncWindow pumps the
+				// platform queue but nothing here dispatches it, so without this the new size would
+				// not be visible until Display.update's next Sdl3Events.pump -- a whole frame drawn
+				// at the old resolution. We are on thread 0 inside this block, which is the only
+				// thread allowed to ask.
+				Sdl3Window.refreshSize();
 			});
 			// No windowedX/Y/Width/Height bookkeeping on this path: SDL restores the previous
 			// windowed geometry itself. No manual resizeCallback either -- Sdl3Events already turns
 			// SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED into the resize flag, and Display.getWidth/Height
-			// read the live window size rather than a cached one.
+			// read the size cache, which the line above has just brought up to date.
 			return;
 		}
 		boolean isWayland = GLFW.glfwGetPlatform() == GLFW.GLFW_PLATFORM_WAYLAND;

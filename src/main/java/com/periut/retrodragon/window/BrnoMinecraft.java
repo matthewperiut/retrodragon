@@ -54,6 +54,15 @@ public class BrnoMinecraft extends Minecraft {
             Display.destroy(); // child path: detaches from the shared window
             return;
         }
+        // AWT is forced headless on the macOS SDL3 path (MacBootstrap), because a non-headless AWT
+        // wants the main run loop SDL3 is holding. Constructing a Frame there throws
+        // HeadlessException -- from inside the crash handler, which means the HeadlessException is
+        // what gets reported and the crash that caused it is the one nobody sees. Print instead.
+        if (GraphicsEnvironment.isHeadless()) {
+            printCrash(throwable);
+            Display.destroy();
+            return;
+        }
         if (this.frame == null) {
             this.frame = new Frame("Minecraft");
         }
@@ -72,6 +81,23 @@ public class BrnoMinecraft extends Minecraft {
         );
         this.frame.setVisible(true);
         Display.destroy();
+    }
+
+    /**
+     * The AWT crash window's content, as text, for the runs that cannot open one.
+     *
+     * <p>stderr rather than the logger: this is the last thing the process does, and it has to work
+     * when the failure is in whatever the logger depends on.
+     */
+    private static void printCrash(CrashReport report) {
+        System.err.println("---- Minecraft has crashed ----");
+        if (report.description != null) {
+            System.err.println(report.description);
+        }
+        if (report.exception != null) {
+            report.exception.printStackTrace();
+        }
+        System.err.println("---- end of crash report ----");
     }
 
     @Override

@@ -8,6 +8,7 @@
   "client": [
     "AnimatedTextureMixin",
     "BenchMixin",
+    "HeldItemGapMixin",
     "BlockRendererMixin",
     "GameOptionsMixin",
     "ChunkBuilderMixin",

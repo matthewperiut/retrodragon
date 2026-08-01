@@ -27,7 +27,31 @@ public final class GlShim {
 	private boolean depthWrite = true;
 	private boolean depthTest;
 	private boolean blend;
-	private int cull = PipelineKey.CULL_NONE;
+	/**
+	 * Culling, as GL actually models it: TWO independent pieces of state.
+	 *
+	 * <p>{@code glEnable(GL_CULL_FACE)} decides whether culling happens at all; {@code glCullFace}
+	 * decides which side is discarded, and is remembered whether or not culling is currently on. WebGPU
+	 * has a single {@code cullMode} covering both, and collapsing them into one field here meant each
+	 * call clobbered the other's half:
+	 *
+	 * <ul>
+	 *   <li>{@code glCullFace(GL_BACK)} with culling DISABLED turned culling on -- geometry GL draws
+	 *       vanished. Beta sets the face and the enable separately, and not always in that order.</li>
+	 *   <li>{@code glEnable(GL_CULL_FACE)} after {@code glCullFace(GL_FRONT)} reverted to back-culling,
+	 *       so the wrong side was discarded.</li>
+	 * </ul>
+	 *
+	 * <p>Both directions matter for anything built from coplanar back-to-back faces -- beta's extruded
+	 * held items are two oppositely-facing walls at every texel boundary, each textured with its own
+	 * side's texel, so culling the wrong one shows the neighbouring texel's colour and culling neither
+	 * lets the two z-fight.
+	 */
+	private boolean cullEnabled;
+
+	/** GL's initial {@code glCullFace} value is {@code GL_BACK}, whether or not culling is enabled. */
+	private int cullFace = PipelineKey.CULL_BACK;
+
 	private int topology = PipelineKey.TOPOLOGY_TRIANGLES;
 	private int program = PipelineKey.PROGRAM_FIXED_FUNCTION;
 
@@ -283,7 +307,7 @@ public final class GlShim {
 		switch (cap) {
 			case 0x0BE2 -> blend = on;             // GL_BLEND
 			case 0x0B71 -> depthTest = on;         // GL_DEPTH_TEST
-			case 0x0B44 -> cull = on ? PipelineKey.CULL_BACK : PipelineKey.CULL_NONE; // GL_CULL_FACE
+			case 0x0B44 -> cullEnabled = on;               // GL_CULL_FACE
 			case 0x0DE1 -> state.setTextureEnabled(on);   // GL_TEXTURE_2D
 			case 0x0B50 -> state.setLightingEnabled(on);  // GL_LIGHTING
 			case 0x8037 -> polygonOffsetFill = on;        // GL_POLYGON_OFFSET_FILL
@@ -312,8 +336,18 @@ public final class GlShim {
 	}
 
 	public void glCullFace(int face) {
-		// GL_FRONT 0x0404, GL_BACK 0x0405.
-		cull = face == 0x0404 ? PipelineKey.CULL_FRONT : PipelineKey.CULL_BACK;
+		// GL_FRONT 0x0404, GL_BACK 0x0405, GL_FRONT_AND_BACK 0x0408. Records the face only -- whether
+		// it is acted on is glEnable(GL_CULL_FACE)'s business, and conflating the two is the bug this
+		// pair of fields exists to prevent.
+		//
+		// GL_FRONT_AND_BACK has no WebGPU equivalent (it discards every triangle) and beta never sets
+		// it, so it falls in with GL_BACK rather than growing a mode the pipeline key cannot encode.
+		cullFace = face == 0x0404 ? PipelineKey.CULL_FRONT : PipelineKey.CULL_BACK;
+	}
+
+	/** The two halves of GL's cull state, resolved into the single mode a pipeline can carry. */
+	private int cull() {
+		return cullEnabled ? cullFace : PipelineKey.CULL_NONE;
 	}
 
 	private static int blendFactor(int glFactor) {
@@ -414,7 +448,7 @@ public final class GlShim {
 		// leftover glPolygonOffset must not split the pipeline space while it is disabled.
 		int units = polygonOffsetFill ? Math.round(polygonOffsetUnits) : 0;
 		int slope = polygonOffsetFill ? Math.round(polygonOffsetFactor) : 0;
-		return PipelineKey.of(src, dst, func, write, depthTest, blend, cull, topology, program,
+		return PipelineKey.of(src, dst, func, write, depthTest, blend, cull(), topology, program,
 			units, slope);
 	}
 
@@ -476,7 +510,7 @@ public final class GlShim {
 		int dst = blend ? blendDst : 0;
 		int func = depthTest ? depthFunc : 0;
 		boolean write = depthTest && depthWrite;
-		return PipelineKey.of(src, dst, func, write, depthTest, blend, cull, topology, program,
+		return PipelineKey.of(src, dst, func, write, depthTest, blend, cull(), topology, program,
 			units, slope);
 	}
 

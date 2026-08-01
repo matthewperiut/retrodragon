@@ -292,6 +292,10 @@ public final class Sdl3Window {
 		if (showAfterTheming) {
 			SDLVideo.SDL_ShowWindow(window);
 		}
+		// Seeds the size cache while we are still on thread 0. Everything downstream -- the renderer's
+		// first configure, Display.getWidth, the log line in create() -- reads the cache and never SDL,
+		// so without this the game would start at 0x0.
+		refreshSize();
 		return true;
 	}
 
@@ -387,16 +391,79 @@ public final class Sdl3Window {
 	}
 
 	/**
+	 * The window's pixel size and scale, as last read on thread 0.
+	 *
+	 * <p><b>Cached, not queried, and that is a correctness requirement rather than an optimisation.</b>
+	 * {@code SDL_GetWindowSizeInPixels} is not a field read on macOS: Cocoa implements it as
+	 * {@code [contentView bounds]} followed by {@code [contentView convertRectToBacking:]}, which are
+	 * AppKit calls. Every other AppKit call in this package is marshalled to thread 0 through
+	 * {@link com.periut.retrodragon.window.MainThread} for exactly one reason, and these were the
+	 * exception -- called straight off the render thread, twice per {@code beginFrame}, once per
+	 * {@code Display.getWidth}, and once per mouse coordinate.
+	 *
+	 * <p>Dragging the window from a 1x display to a Retina one is where that came due. AppKit raises
+	 * {@code windowDidChangeBackingProperties} on thread 0 and SDL rebuilds the content view's backing
+	 * store inside it, while the render thread is reading the bounds of that same view. See
+	 * {@link #refreshSize()} for what replaced it.
+	 *
+	 * <p>Volatile so the render thread sees thread 0's update without a lock. The three are read
+	 * independently and can therefore be torn across a scale change -- a frame rendered at the old
+	 * width and the new height, once, is the worst case, and the next frame's poll corrects it. A lock
+	 * to prevent that would be held on the frame path against the event pump, which is the coupling
+	 * this whole change exists to remove.
+	 */
+	private static volatile int pixelWidth;
+	private static volatile int pixelHeight;
+	private static volatile float pixelsPerPoint = 1.0F;
+
+	/**
+	 * Re-reads the window's pixel size and scale from SDL. <b>Thread 0 only.</b>
+	 *
+	 * <p>Called once at creation to seed the cache, and from {@link Sdl3Events#dispatch} on every event
+	 * that can change either -- resize, pixel-size change, Metal view resize, and the two display
+	 * events a window raises when it is dragged onto a panel with a different scale factor. That
+	 * dispatch already runs on thread 0, so the AppKit call lands where AppKit wants it and, because
+	 * thread 0 does one thing at a time, it cannot overlap with the run-loop callback that is changing
+	 * the backing store underneath it.
+	 */
+	public static void refreshSize() {
+		if (window == 0L) {
+			return;
+		}
+		try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+			java.nio.IntBuffer pw = stack.mallocInt(1);
+			java.nio.IntBuffer ph = stack.mallocInt(1);
+			java.nio.IntBuffer lw = stack.mallocInt(1);
+			java.nio.IntBuffer lh = stack.mallocInt(1);
+			SDLVideo.SDL_GetWindowSizeInPixels(window, pw, ph);
+			SDLVideo.SDL_GetWindowSize(window, lw, lh);
+			int px = pw.get(0);
+			int py = ph.get(0);
+			int logical = lw.get(0);
+			// A zero here means the window is minimised or being torn down. Keeping the last good size
+			// is better than publishing 0: the renderer clamps to 1x1 and would reconfigure the
+			// swapchain twice for nothing on every minimise.
+			if (px > 0 && py > 0) {
+				pixelWidth = px;
+				pixelHeight = py;
+			}
+			if (logical > 0 && px > 0) {
+				pixelsPerPoint = (float) px / logical;
+			}
+		}
+	}
+
+	/**
 	 * Framebuffer size in PIXELS, not logical units -- they differ under display scaling, and the
 	 * renderer needs pixels. This is what Display.getWidth/getHeight must return; forgetting it
 	 * made the whole frame render at 1x1.
 	 */
 	public static int width() {
-		return size(true);
+		return pixelWidth;
 	}
 
 	public static int height() {
-		return size(false);
+		return pixelHeight;
 	}
 
 	/**
@@ -406,31 +473,7 @@ public final class Sdl3Window {
 	 * coordinate has to be multiplied by this before beta sees it.
 	 */
 	public static float pixelsPerPoint() {
-		if (window == 0L) {
-			return 1.0F;
-		}
-		try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
-			java.nio.IntBuffer pw = stack.mallocInt(1);
-			java.nio.IntBuffer ph = stack.mallocInt(1);
-			java.nio.IntBuffer lw = stack.mallocInt(1);
-			java.nio.IntBuffer lh = stack.mallocInt(1);
-			SDLVideo.SDL_GetWindowSizeInPixels(window, pw, ph);
-			SDLVideo.SDL_GetWindowSize(window, lw, lh);
-			int logical = lw.get(0);
-			return logical <= 0 ? 1.0F : (float) pw.get(0) / logical;
-		}
-	}
-
-	private static int size(boolean wantWidth) {
-		if (window == 0L) {
-			return 0;
-		}
-		try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
-			java.nio.IntBuffer w = stack.mallocInt(1);
-			java.nio.IntBuffer h = stack.mallocInt(1);
-			SDLVideo.SDL_GetWindowSizeInPixels(window, w, h);
-			return wantWidth ? w.get(0) : h.get(0);
-		}
+		return window == 0L ? 1.0F : pixelsPerPoint;
 	}
 
 	/**
@@ -455,6 +498,13 @@ public final class Sdl3Window {
 	 * layer out from under it leaves the compositor waiting on a drawable that will never be
 	 * returned -- which does not crash the game, it wedges the SYSTEM render server, and the only way
 	 * out is a reboot. Whoever created the surface has to tear it down first.
+	 *
+	 * <p><b>Called on the game thread, not thread 0</b>, because most of what a renderer teardown does
+	 * -- waiting for the GPU, freeing buffers and pipelines -- has no business occupying the thread
+	 * AppKit is being pumped from, and the wait alone can run into seconds. The consequence is that
+	 * the hook runs WHILE thread 0 is still pumping events, so any part of it that touches the layer
+	 * has to marshal itself; {@code WebGpuRenderer.close} does exactly that around the surface, and
+	 * nothing else on that path goes near the window.
 	 */
 	private static Runnable shutdownHook;
 
@@ -638,6 +688,11 @@ public final class Sdl3Window {
 			}
 			shutdownHook = null;
 		}
+		// Nothing may present after the surface has gone. The hook is Sdl3Window's only route back
+		// into the renderer, and the window survives for a few more statements below -- so anything
+		// that reaches swapBuffers in that gap (beta draws a progress screen while it saves) would
+		// call into a renderer whose surface is already released.
+		presentHook = null;
 		// The context belongs to the render thread that made it current, so it is released here;
 		// the window and the video subsystem belong to thread 0 and must be torn down there.
 		if (context != 0L) {
@@ -645,6 +700,13 @@ public final class Sdl3Window {
 			context = 0L;
 		}
 		com.periut.retrodragon.window.MainThread.run(() -> {
+			// Thread 0 stops driving AppKit here, and it has to be here rather than after the block:
+			// its idle task is SDL_PumpEvents, it runs on every pass of the drain loop for as long as
+			// the game thread is alive, and the next three statements take the window and the video
+			// subsystem out from under it. Pumping a quit SDL is the tail end of the same class of
+			// bug as everything else on this path -- the difference is only that it happens after the
+			// last frame, where nobody is looking.
+			com.periut.retrodragon.window.MainThread.clearIdleTask();
 			// The Metal view is a subview of the window, so it goes first -- destroying the window
 			// out from under it leaves the layer dangling, and Dawn may still hold a reference.
 			if (metalView != 0L) {
@@ -655,6 +717,9 @@ public final class Sdl3Window {
 			if (window != 0L) {
 				SDLVideo.SDL_DestroyWindow(window);
 				window = 0L;
+				pixelWidth = 0;
+				pixelHeight = 0;
+				pixelsPerPoint = 1.0F;
 			}
 			if (initialized) {
 				SDLInit.SDL_Quit();

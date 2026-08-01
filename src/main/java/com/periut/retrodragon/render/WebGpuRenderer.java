@@ -92,7 +92,23 @@ public final class WebGpuRenderer implements AutoCloseable {
 		// that no longer exists -- the same hazard as releasing a surface during teardown, on a path
 		// the player can trigger at will by changing the Performance option mid-game.
 		ctx.drain(2000);
-		surface.configure(arena, w, h, wanted);
+		// Marshalled to thread 0 on macOS, where wgpuSurfaceConfigure is not a GPU call but a WINDOW
+		// call: Dawn's Metal backend implements it by writing `drawableSize`, `contentsScale` and
+		// `pixelFormat` on the window's CAMetalLayer, which rebuilds the layer's drawable pool.
+		//
+		// SDL writes those same properties, from thread 0, inside AppKit's
+		// windowDidChangeBackingProperties -- which is precisely the callback that fires when the
+		// window is dragged onto a display with a different scale factor, and precisely the moment
+		// this method is reached, because that is what changed the size we are reconfiguring to. Two
+		// threads rebuilding one drawable pool at once is how a drawable stops coming back, and a
+		// drawable that never comes back does not hang the game, it hangs the system compositor (see
+		// the class notes on Immediate present mode, which found the same wall from the other side).
+		//
+		// Safe to block here: ctx.drain above means no frame is executing, and nothing has acquired
+		// this frame's backbuffer yet -- beginFrame calls resize before currentView, and
+		// syncPresentMode runs before beginFrame -- so thread 0 cannot be waiting on anything we hold.
+		// Off macOS MainThread.run is a direct call.
+		com.periut.retrodragon.window.MainThread.run(() -> surface.configure(arena, w, h, wanted));
 		if (surface.presentMode() != wanted) {
 			// A silent fallback to Fifo is indistinguishable from Balanced on screen, so say so
 			// rather than leaving "Max FPS behaves exactly like vsync" to be puzzled over.
@@ -446,8 +462,22 @@ public final class WebGpuRenderer implements AutoCloseable {
 		// Time-bounded rather than spin-bounded: the per-frame wait must never stall a frame, but
 		// here it is worth milliseconds to be certain the pipeline is empty.
 		if (!ctx.drain(2000)) {
+			// LEAK EVERYTHING, DELIBERATELY, and say so.
+			//
+			// The old behaviour was to log this and carry on releasing, which is the one thing the
+			// drain exists to prevent -- every release below (the depth texture, the offscreen target,
+			// the surface) is a release of something work still executing may be reading. "Free it
+			// anyway" turns a failed wait into the exact hung-desktop case, so the warning was
+			// describing the hazard while walking into it.
+			//
+			// Not releasing costs nothing that matters: this runs during process teardown, so the OS
+			// reclaims the memory a few milliseconds later, and the GPU work finishes against objects
+			// that are still alive. A leak that lasts until exit beats a reboot.
 			System.err.println("[RetroDragon] GPU did not drain before teardown; "
-				+ ctx.framesInFlight() + " frame(s) still in flight");
+				+ ctx.framesInFlight() + " frame(s) still in flight."
+				+ " Leaving the surface and its textures alive rather than releasing them under"
+				+ " live work -- they will go away with the process.");
+			return;
 		}
 		if (frameArena != null) {
 			frameArena.close();
@@ -461,7 +491,12 @@ public final class WebGpuRenderer implements AutoCloseable {
 			offscreen.close();
 			offscreen = null;
 		}
-		surface.close();
+		// Thread 0 on macOS, for the reason spelled out in resize(): unconfiguring and releasing a
+		// surface is a CAMetalLayer operation, and thread 0 is running AppKit against that same layer
+		// on its idle pump right up until the window is destroyed. This is the last and most dangerous
+		// layer call of the run -- it is the one that hands the drawable pool back -- so it is the one
+		// that least tolerates racing the window server.
+		com.periut.retrodragon.window.MainThread.run(surface::close);
 		arena.close();
 	}
 }

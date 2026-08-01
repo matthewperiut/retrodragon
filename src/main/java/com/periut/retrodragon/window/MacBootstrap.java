@@ -31,9 +31,13 @@ public final class MacBootstrap {
 		Queue<Runnable> queue = new ConcurrentLinkedQueue<>();
 		System.getProperties().put(MainThread.QUEUE_KEY, queue);
 
+		// Thread 0 runs work written by mod code, so it has to advertise mod code's classloader. See
+		// adoptKnotClassLoader for what goes wrong when it advertises the launcher's instead.
+		Thread mainThread = Thread.currentThread();
+
 		Thread knot = new Thread(() -> {
 			try {
-				launchHeadless(args);
+				launchHeadless(args, mainThread);
 			} catch (Throwable t) {
 				t.printStackTrace();
 				System.exit(1);
@@ -65,7 +69,7 @@ public final class MacBootstrap {
 	 * <p>Reflective throughout because these are loader-internal classes, and HeadlessLaunch must
 	 * come from Knot's classloader so the game classes it touches are transformed.
 	 */
-	private static void launchHeadless(String[] args) throws Exception {
+	private static void launchHeadless(String[] args, Thread mainThread) throws Exception {
 		Class<?> envTypeCls = Class.forName("net.fabricmc.api.EnvType");
 		@SuppressWarnings({"unchecked", "rawtypes"})
 		Object client = Enum.valueOf((Class<Enum>) envTypeCls.asSubclass(Enum.class), "CLIENT");
@@ -75,11 +79,48 @@ public final class MacBootstrap {
 		ClassLoader target = (ClassLoader) knotCls.getMethod("init", String[].class)
 				.invoke(knot, (Object) args);
 
+		adoptKnotClassLoader(mainThread, target);
+
 		// Hand off to the mod's own copy, loaded by Knot so the game classes it touches are
 		// transformed. Reflective because this class lives on the system classloader.
 		Class.forName("com.periut.retrodragon.window.HeadlessLaunch", true, target)
 				.getMethod("start", String[].class)
 				.invoke(null, (Object) args);
+	}
+
+	/**
+	 * Points thread 0's CONTEXT classloader at Knot, as early as Knot can supply one.
+	 *
+	 * <p>Thread 0 is the JVM launcher's main thread, so it starts out advertising the system
+	 * classloader -- and it never runs anything of its own again. Everything it executes after this
+	 * point arrives through {@link MainThread}'s queue as a Runnable written by mod code and loaded
+	 * by Knot, so the system loader is not merely a stale answer, it is the wrong one.
+	 *
+	 * <p><b>What that costs, concretely.</b> Loading a class for the first time runs it through
+	 * Knot's mixin pipeline, and StationAPI's spASM hook hands each transformer
+	 * {@code Thread.currentThread().getContextClassLoader()}. UnsafeEvents' transformer then does
+	 * {@code classLoader.loadClass(superName)} on EVERY class it sees, to find out whether it is an
+	 * Event subclass. So the first thread to touch a class decides which loader that lookup uses, and
+	 * a lookup that fails does not skip the class -- it throws, and Knot reports it as
+	 * "Mixin transformation of &lt;class&gt; failed".
+	 *
+	 * <p>That made it a launcher-specific crash with a misleading cause. In a dev run LWJGL 3 sits on
+	 * {@code java.class.path}, so the system loader finds it and nothing is wrong. In a production
+	 * install LWJGL 3 ships as jar-in-jar and lives only on Knot, so any LWJGL class first touched
+	 * from thread 0 -- {@code SDL_Rect$Buffer}, from the text-input setup -- died on
+	 * {@code ClassNotFoundException: org.lwjgl.system.StructBuffer}, naming a class that was present
+	 * the whole time and a mixin that had nothing to do with it.
+	 *
+	 * <p>Set from the Knot thread rather than thread 0 because thread 0 is already parked in
+	 * {@link #drain}: {@code init()} is what produces the loader, and it returns here. Thread 0 has
+	 * nothing to load before this runs -- its queue is empty and its idle task is not installed until
+	 * the window is created, both of which happen downstream of this call.
+	 */
+	private static void adoptKnotClassLoader(Thread mainThread, ClassLoader target) {
+		if (target == null) {
+			return;
+		}
+		mainThread.setContextClassLoader(target);
 	}
 
 	/**
