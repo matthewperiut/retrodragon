@@ -31,6 +31,18 @@ import net.minecraft.client.Minecraft;
  * goes through {@link #isRgss()} / {@link #isMipmap()} instead, so a runtime change actually reaches
  * the shader and the texture upload path.
  *
+ * <h2>Frame limit: pass-through, not owned here</h2>
+ *
+ * {@link #getFrameLimit()} / {@link #setFrameLimit(int)} are a thin pass-through to
+ * {@code com.periut.retrodragon.render.FramePacing}, unlike RGSS and mipmaps above -- the actual
+ * pacing decision (does the renderer wait for the display, how long does it sleep before presenting)
+ * has to be made where the renderer already reads {@code vsyncOverride}, the boolean equivalent
+ * {@code Display.setVSyncEnabled} feeds. Keeping both in {@code FramePacing} means a mod can ask for
+ * "vsync" through one entry point and "a number" through the other and get one documented answer for
+ * what happens when it does both -- see that class's javadoc. {@code Display.sync(int)}, LWJGL 2's
+ * classic frame limiter, sets this exact same value, so a mod written for vanilla b1.7.3 that already
+ * calls that gets this for free, with no code change.
+ *
  * <h2>RGSS: instant, either direction</h2>
  *
  * RGSS is read as a plain per-draw shader uniform ({@code TerrainShader}, {@code TerrainAppearance}).
@@ -69,6 +81,16 @@ public final class RetroSettings {
 	private static volatile boolean mipmap = Config.MIPMAP;
 	/** Set when {@link #setMipmap} enables mipmaps from off the render thread; drained by the pump. */
 	private static volatile boolean pendingMipmapReupload;
+
+	/**
+	 * The value {@link #setFrameLimit(int)} treats as "no numeric cap" -- {@link #getFrameLimit()}
+	 * starts here, and passing it back to {@link #setFrameLimit(int)} clears whatever was set. {@code
+	 * 0}, matching the convention {@code BenchMixin} already uses for vanilla's own {@code fpsLimit}
+	 * field (0 = MAX, uncapped) and what {@code FramePacing} stores internally for the same reason: a
+	 * reflective caller only ever needs to know the number, not read this constant, so keeping the two
+	 * conventions identical means there is exactly one "unlimited" to remember, not two.
+	 */
+	public static final int NO_FRAME_LIMIT = 0;
 
 	private RetroSettings() {
 	}
@@ -114,6 +136,34 @@ public final class RetroSettings {
 	}
 
 	/**
+	 * The current numeric frame-rate cap, in frames per second, or {@link #NO_FRAME_LIMIT} when none
+	 * is set. See the class javadoc for why this reads {@code FramePacing} rather than a field here.
+	 */
+	public static int getFrameLimit() {
+		return com.periut.retrodragon.render.FramePacing.getFrameLimit();
+	}
+
+	/**
+	 * Requests that the renderer hold this exact frame rate. Safe from any thread and safe on both
+	 * backends -- it only ever writes one {@code volatile int}; see {@code FramePacing.setFrameLimit}
+	 * for what reads it and when. Takes effect on the very next frame paced, on either backend: WebGPU
+	 * paces at {@code WebGpuRenderer.endFrame}, GL paces at {@code Display}'s swap points, and both run
+	 * unconditionally once per frame regardless of what a caller does.
+	 *
+	 * <p>{@code fps <= 0} clears the cap ({@link #NO_FRAME_LIMIT}) rather than being rejected -- the
+	 * same convention {@code Display.sync(int)}, LWJGL 2's classic frame limiter, already uses, since
+	 * both entry points end up setting the exact same value.
+	 *
+	 * <p>Interacts with vsync ({@code Display.setVSyncEnabled}) rather than overriding it: a caller
+	 * that sets both gets both, the same way vanilla's own Power Saver tier already combines vsync
+	 * with a fixed sleep. See {@code FramePacing}'s class javadoc for the full precedence, including
+	 * what a numeric cap does to WebGPU's present-mode choice.
+	 */
+	public static void setFrameLimit(int fps) {
+		com.periut.retrodragon.render.FramePacing.setFrameLimit(fps);
+	}
+
+	/**
 	 * Applies a mipmap-enable that {@link #setMipmap} could not perform synchronously because it was
 	 * called off the render thread. A no-op almost every time it runs: {@code Display.update()} calls
 	 * this once per frame so the deferred case is covered without any render-path file needing to know
@@ -149,11 +199,23 @@ public final class RetroSettings {
 	 * {@code ./gradlew retroSettingsTest} -- the no-game-required half of this class's contract:
 	 * defaults, the no-op guard, and the render-thread/deferred split. What it cannot check outside
 	 * the game is the reupload actually reaching the GPU; that needs a running client (see the class
-	 * javadoc for what to look for there).
+	 * javadoc for what to look for there). The frame-limit pass-through is checked here too; the
+	 * pacing arithmetic it feeds is {@code FramePacing}'s own -- see {@code framePacingTest}.
 	 */
 	public static void main(String[] args) throws InterruptedException {
 		expect(isRgss() == Config.RGSS, "isRgss() starts at Config.RGSS's launch-time default");
 		expect(isMipmap() == Config.MIPMAP, "isMipmap() starts at Config.MIPMAP's launch-time default");
+		expect(getFrameLimit() == NO_FRAME_LIMIT, "getFrameLimit() starts unset");
+
+		// A thin pass-through to FramePacing, not a field owned here -- see the class javadoc. Just
+		// the round trip and the sentinel; the precedence it feeds (vsyncOverride, the three-tier
+		// setting) is FramePacing's own contract, checked in framePacingTest.
+		setFrameLimit(75);
+		expect(getFrameLimit() == 75, "setFrameLimit(75) reached FramePacing and read back");
+		setFrameLimit(-1);
+		expect(getFrameLimit() == NO_FRAME_LIMIT, "a negative fps reads back as NO_FRAME_LIMIT");
+		setFrameLimit(NO_FRAME_LIMIT);
+		expect(getFrameLimit() == NO_FRAME_LIMIT, "setFrameLimit(NO_FRAME_LIMIT) clears the cap");
 
 		// RGSS: every toggle is instant and never touches the reupload machinery.
 		setRgss(false);

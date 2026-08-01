@@ -96,6 +96,6 @@ public final class FrameTimer {
 			String.format("%.1f", 1000.0 / lowMs), String.format("%.2f", lowMs),
 			RenderBackend.isWebGpu()
 				? " [WebGPU, " + WebGpuFrame.lastDraws() + " draws, " + FramePacing.describe() + "]"
-				: " [OpenGL]");
+				: " [OpenGL, " + FramePacing.describe() + "]");
 	}
 }

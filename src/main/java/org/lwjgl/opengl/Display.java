@@ -785,6 +785,10 @@ public final class Display {
 			// loading) the hub's last frame stays on screen -- the child's
 			// frames are held until it reaches its logging-in screen.
 			if (com.periut.retrodragon.retrocenter.bridge.HubBridge.mayChildPresent()) {
+				// This child instance's own FramePacing (a separate static instance under its own
+				// classloader, same as everything else RetroCenter isolates per child) -- paces this
+				// child's frames independently of the hub's.
+				com.periut.retrodragon.render.FramePacing.await();
 				GLFW.glfwSwapBuffers(handle);
 			}
 			return;
@@ -801,6 +805,12 @@ public final class Display {
 			Keyboard.poll();
 		}
 
+		// This backend's per-frame pacing point (the GLFW path is always GL -- see SDL/ENABLED above --
+		// so unlike the SDL branches elsewhere in this file, nothing here needs to guard against
+		// WebGPU's own call inside WebGpuRenderer.endFrame). Right before the swap, so the frame about
+		// to become visible is as fresh as possible when the wait lands here rather than earlier in the
+		// frame -- same reasoning as WebGPU's placement, between submit and present.
+		com.periut.retrodragon.render.FramePacing.await();
 		GLFW.glfwSwapBuffers(handle);
 		// After GLFW commits the surface via swapBuffers, dispatch any
 		// pending cursor warp so the lock callback fires.
@@ -1235,10 +1245,30 @@ public final class Display {
 		}
 	}
 
+	/**
+	 * LWJGL 2's classic frame limiter -- what a mod written for vanilla b1.7.3 calls, once a frame, to
+	 * cap its rate to an arbitrary number. Sets {@link com.periut.retrodragon.render.FramePacing}'s
+	 * numeric target rather than the same class's own {@link Sync#sync}: {@code Sync} paces against a
+	 * clock nobody else reads, while {@code FramePacing} is the one both backends' present paths and
+	 * {@code RetroSettings.setFrameLimit} already share, so a mod calling this and a mod calling the
+	 * new reflective API land on the same cap and the same present-mode decision.
+	 *
+	 * <p><b>Deliberately does not sleep here.</b> {@code FramePacing.await()} already runs once a
+	 * frame, right before the frame is actually shown -- {@link #update()} / {@link #swapBuffers()}
+	 * on GL, {@code WebGpuRenderer.endFrame} on WebGPU -- and vanilla's own loop reaches one of those
+	 * every single iteration regardless of what a mod does. Sleeping again here, on top of that,
+	 * would be two independent clocks pacing the same target in the same iteration; started at
+	 * different moments, they land out of phase, and the wait each performs on top of the other
+	 * roughly DOUBLES the effective frame period -- silently, with neither clock's own arithmetic
+	 * wrong on its own. One caller sets the target; one place, later in the same iteration, sleeps
+	 * for it.
+	 *
+	 * <p>{@code fps <= 0} clears the cap ({@link com.periut.retrodragon.api.RetroSettings#NO_FRAME_LIMIT}),
+	 * the same convention {@link Sync#sync} itself already uses.
+	 */
 	public static void sync(int fps) {
-		Sync.sync(fps);
+		com.periut.retrodragon.render.FramePacing.setFrameLimit(fps);
 	}
-
 
 	/**
 	 * Also feeds {@code FramePacing}: under WebGPU there is no GL swap interval to set (the window is
@@ -1246,6 +1276,10 @@ public final class Display {
 	 * permanent no-op), and the swapchain's present mode is what actually gates presentation there.
 	 * Without this line a mod calling the classic LWJGL 2 vsync toggle changed nothing under
 	 * RetroDragon's default backend. See {@code FramePacing#vsyncOverride}.
+	 *
+	 * <p>Orthogonal to {@link #sync(int)}: this toggles whether presentation waits for the display,
+	 * that sets the maximum sustained rate. A mod calling both gets both -- see
+	 * {@code FramePacing#await()} for exactly how they combine.
 	 */
 	public static void setVSyncEnabled(boolean enabled) {
 		com.periut.retrodragon.render.FramePacing.setVsyncOverride(enabled);
@@ -1313,6 +1347,14 @@ public final class Display {
 					&& !com.periut.retrodragon.retrocenter.bridge.HubBridge.mayChildPresent()) {
 				return;
 			}
+			// Only for a real GL swap. Under WebGPU (noGl) this call hands off to the present hook,
+			// which is WebGpuFrame::present -- and that already calls FramePacing.await() itself,
+			// inside WebGpuRenderer.endFrame, between submit and present. Calling it again here too
+			// would be two independent waits racing to hold the same rate in the same frame; see the
+			// long version of that reasoning on Display.sync(int).
+			if (!com.periut.retrodragon.window.sdl.Sdl3Window.isNoGl()) {
+				com.periut.retrodragon.render.FramePacing.await();
+			}
 			com.periut.retrodragon.window.sdl.Sdl3Window.swapBuffers();
 			return;
 		}
@@ -1323,6 +1365,9 @@ public final class Display {
 				&& !com.periut.retrodragon.retrocenter.bridge.HubBridge.mayChildPresent()) {
 			return;
 		}
+		// The GLFW backend is GL-only (see the class doc on SDL/ENABLED) -- never guarded, unlike the
+		// SDL branch above.
+		com.periut.retrodragon.render.FramePacing.await();
 		GLFW.glfwSwapBuffers(handle);
 	}
 
