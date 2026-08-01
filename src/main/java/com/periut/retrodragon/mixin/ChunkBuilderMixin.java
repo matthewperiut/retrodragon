@@ -55,6 +55,33 @@ public abstract class ChunkBuilderMixin implements RetroSection {
 	/** Bumped whenever the section moves, so an in-flight mesh for the old position is discarded. */
 	@Unique private int retroperf$generation;
 	@Unique private boolean retroperf$meshing;
+	/**
+	 * A rebuild was requested while a mesh was already in flight, so the result of that mesh will be
+	 * stale the moment it lands and the section has to be built again.
+	 *
+	 * <p>This is what stops a chunk being left at the wrong time of day.
+	 * {@code WorldRenderer.compileChunks} clears {@code dirty} UNCONDITIONALLY right after calling
+	 * {@code rebuild()}:
+	 *
+	 * <pre>chunk.rebuild(); chunk.dirty = false;</pre>
+	 *
+	 * <p>It does not ask whether the rebuild happened. Vanilla's could not fail to, but ours declines
+	 * whenever the section already has a mesh in flight, and the clear lands anyway. The request is
+	 * swallowed: the section comes out clean, off {@code dirtyChunks}, holding geometry that was
+	 * snapshotted before whatever prompted the request.
+	 *
+	 * <p>Which matters most for sky light, because {@code notifyAmbientDarknessChanged} is a ONE-SHOT
+	 * sweep -- it walks every section once per ambient step and skips any that is already dirty. Lose
+	 * that one call and nothing comes back for it. Dusk moves the ambient level through a series of
+	 * steps, so a section that happens to be meshing during one of them keeps the light level from
+	 * the step before, and once night settles there are no more sweeps to correct it. It stays a
+	 * visibly different brightness from its neighbours until an unrelated block change nearby
+	 * dirties it again.
+	 *
+	 * <p>Async meshing is what makes it reachable: vanilla built sections inline, so a rebuild request
+	 * could never arrive while one was outstanding.
+	 */
+	@Unique private boolean retroperf$restale;
 	@Unique private long retroperf$visibility = com.periut.retrodragon.render.SectionVisibility.ALL_CONNECTED;
 
 	@Override
@@ -110,6 +137,10 @@ public abstract class ChunkBuilderMixin implements RetroSection {
 	@Override
 	public void retroperf$applyMesh(MeshResult result) {
 		this.retroperf$meshing = false;
+		// A rebuild was asked for while this mesh was in flight, so the geometry that just arrived is
+		// already out of date. Ask again, once, now that the section is free to accept one.
+		boolean restale = this.retroperf$restale;
+		this.retroperf$restale = false;
 		if (result.failed || result.generation != this.retroperf$generation) {
 			// Either the worker threw, or the section moved while this was in flight and the geometry
 			// is for the old position. Nothing usable arrived, so the section has to be built again.
@@ -125,10 +156,7 @@ public abstract class ChunkBuilderMixin implements RetroSection {
 			// `reset(); this.world = null`. The reset bumps the generation, so an in-flight mesh lands
 			// here with nothing left to schedule against. reload() builds fresh sections and marks
 			// them dirty itself, so the right answer is to drop this result on the floor.
-			if (!this.dirty && this.world != null) {
-				this.world.setBlocksDirty(this.x, this.y, this.z,
-					this.x + this.sizeX - 1, this.y + this.sizeY - 1, this.z + this.sizeZ - 1);
-			}
+			this.retroperf$scheduleRebuild();
 			return;
 		}
 
@@ -159,6 +187,34 @@ public abstract class ChunkBuilderMixin implements RetroSection {
 		this.retroperf$visibility = result.visibility;
 		this.hasSkyLight = result.hasSkyLight;
 		this.built = true;
+
+		if (restale) {
+			this.retroperf$scheduleRebuild();
+		}
+	}
+
+	/**
+	 * Puts this section back on {@code WorldRenderer.dirtyChunks} through the world.
+	 *
+	 * <p>Through the world, NOT {@code this.dirty = true}. Vanilla only ever rebuilds sections that
+	 * are in {@code WorldRenderer.dirtyChunks}, and the only thing that puts one there --
+	 * {@code WorldRenderer.markDirty} -- skips a section whose {@code dirty} is already set. Setting
+	 * the flag by hand therefore takes the section OUT of the rebuild path permanently: it looks
+	 * scheduled to everything that can schedule it, and is never built again. The chunk then keeps
+	 * whatever lighting it last had, through every block and sky light update, forever.
+	 *
+	 * <p>A null world means {@code close()} has run: {@code WorldRenderer.reload()} -- which is what a
+	 * video option like Advanced OpenGL triggers -- calls {@code close()} on every section, and
+	 * {@code close()} is {@code reset(); this.world = null}. The reset bumps the generation, so an
+	 * in-flight mesh lands here with nothing left to schedule against. {@code reload()} builds fresh
+	 * sections and marks them dirty itself, so the right answer is to drop the request on the floor.
+	 */
+	@Unique
+	private void retroperf$scheduleRebuild() {
+		if (!this.dirty && this.world != null) {
+			this.world.setBlocksDirty(this.x, this.y, this.z,
+				this.x + this.sizeX - 1, this.y + this.sizeY - 1, this.z + this.sizeZ - 1);
+		}
 	}
 
 	@Inject(method = "rebuild()V", at = @At("HEAD"), cancellable = true)
@@ -167,7 +223,13 @@ public abstract class ChunkBuilderMixin implements RetroSection {
 			return;
 		}
 		ci.cancel();
-		if (!this.dirty || this.retroperf$meshing) {
+		if (!this.dirty) {
+			return;
+		}
+		if (this.retroperf$meshing) {
+			// Declining the request, so record it: compileChunks is about to clear `dirty` whether we
+			// built anything or not, and without this the request is simply lost. See retroperf$restale.
+			this.retroperf$restale = true;
 			return;
 		}
 
