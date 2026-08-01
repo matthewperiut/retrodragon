@@ -1,6 +1,6 @@
 package com.periut.retrodragon.render;
 
-import com.periut.retrodragon.Config;
+import com.periut.retrodragon.api.RetroSettings;
 
 import net.minecraft.client.Minecraft;
 
@@ -69,12 +69,12 @@ public final class TerrainAppearance {
 	/**
 	 * How far the mip chain may be walked. 0 pins sampling to level 0, which is vanilla's look.
 	 *
-	 * <p>Also gated on {@link Config#MIPMAP}, because a chain that was never uploaded cannot be
-	 * sampled -- reading level 3 of a single-level texture is undefined, and on some drivers it is
-	 * flat white.
+	 * <p>Also gated on {@link RetroSettings#isMipmap()}, because a chain that was never uploaded
+	 * cannot be sampled -- reading level 3 of a single-level texture is undefined, and on some
+	 * drivers it is flat white.
 	 */
 	public static float maxLod() {
-		return enabled() && Config.MIPMAP ? BlockAtlas.mipLevels() : 0.0F;
+		return enabled() && RetroSettings.isMipmap() ? BlockAtlas.mipLevels() : 0.0F;
 	}
 
 	/**
@@ -84,6 +84,6 @@ public final class TerrainAppearance {
 	 * per-tile clamp, so without a grid RGSS would smear one sprite into the next.
 	 */
 	public static float rgss() {
-		return enabled() && Config.RGSS && BlockAtlas.clamped() ? 1.0F : 0.0F;
+		return enabled() && RetroSettings.isRgss() && BlockAtlas.clamped() ? 1.0F : 0.0F;
 	}
 }

@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 
 import com.periut.retrodragon.Config;
 import com.periut.retrodragon.RetroDragon;
+import com.periut.retrodragon.api.RetroSettings;
 
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL20;
@@ -82,7 +83,7 @@ public final class TerrainShader {
 		// and RGSS on the uniform alone is what used to switch both off under StationAPI.
 		boolean clamped = tileTexels > 0.0F || spriteClamp;
 		GL20.glUniform1f(uMaxLod, clamped ? maxLod : 0.0F);
-		GL20.glUniform1f(uRgss, Config.RGSS && clamped ? 1.0F : 0.0F);
+		GL20.glUniform1f(uRgss, RetroSettings.isRgss() && clamped ? 1.0F : 0.0F);
 		GL20.glUniform1i(uFogMode, FogState.mode());
 		active = true;
 		return true;

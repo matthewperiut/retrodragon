@@ -2,7 +2,7 @@ package com.periut.retrodragon.render;
 
 import java.nio.ByteBuffer;
 
-import com.periut.retrodragon.Config;
+import com.periut.retrodragon.api.RetroSettings;
 
 /**
  * Keeps an animated tile's mip levels in step with the frame that was just uploaded.
@@ -60,7 +60,7 @@ public final class AnimatedMipmaps {
 	 *     only -- the caller's buffer is left at the position it arrived with.
 	 */
 	public static void regenerate(int name, int x, int y, int width, int height, ByteBuffer rgba) {
-		if (!Config.MIPMAP || rgba == null || !isWholeTile(name, x, y, width, height)) {
+		if (!RetroSettings.isMipmap() || rgba == null || !isWholeTile(name, x, y, width, height)) {
 			return;
 		}
 		int levels = BlockAtlas.mipLevels();

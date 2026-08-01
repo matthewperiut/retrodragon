@@ -2,7 +2,7 @@ package com.periut.retrodragon.mixin;
 
 import java.awt.image.BufferedImage;
 
-import com.periut.retrodragon.Config;
+import com.periut.retrodragon.api.RetroSettings;
 import com.periut.retrodragon.render.BlockAtlas;
 import com.periut.retrodragon.render.TerrainMipmaps;
 
@@ -68,7 +68,7 @@ public class MipmapCompletenessMixin {
 		// Recorded whether or not mipmaps are on: the shader's texel inset is derived from the atlas
 		// size too, so an HD pack under -Dretroperf.mipmap=false still has to be measured here.
 		BlockAtlas.observe(image.getWidth(), image.getHeight());
-		if (Config.MIPMAP) {
+		if (RetroSettings.isMipmap()) {
 			TerrainMipmaps.apply(image);
 		}
 	}

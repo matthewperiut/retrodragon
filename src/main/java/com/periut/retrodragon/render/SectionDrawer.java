@@ -1,6 +1,6 @@
 package com.periut.retrodragon.render;
 
-import com.periut.retrodragon.Config;
+import com.periut.retrodragon.api.RetroSettings;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -144,7 +144,7 @@ public final class SectionDrawer {
 		// can change it mid-run. Two reflective field reads per frame, no allocation.
 		BlockAtlas.refresh();
 		boolean shader = TerrainShader.begin(BlockAtlas.texels(), BlockAtlas.texels(),
-			BlockAtlas.tileTexels(), Config.MIPMAP ? BlockAtlas.mipLevels() : 0.0F);
+			BlockAtlas.tileTexels(), RetroSettings.isMipmap() ? BlockAtlas.mipLevels() : 0.0F);
 		GL11.glEnableClientState(GL11.GL_VERTEX_ARRAY);
 		GL11.glEnableClientState(GL11.GL_TEXTURE_COORD_ARRAY);
 		GL11.glEnableClientState(GL11.GL_COLOR_ARRAY);

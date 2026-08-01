@@ -42,7 +42,23 @@ public final class FramePacing {
 
 	private static long nextFrameAt;
 
+	/**
+	 * Set by {@code Display.setVSyncEnabled}, LWJGL 2's swap-interval API. Under WebGPU there is no
+	 * GL swap interval to set -- {@code RenderBackend.select()} calls {@code Sdl3Window.setNoGl(true)}
+	 * before the window even exists, which makes {@code Sdl3Window.setSwapInterval} a permanent no-op
+	 * for the rest of the run -- so without this, a mod calling that LWJGL API on the default backend
+	 * changed nothing here and nothing on screen. {@code null} until a mod calls it, meaning the
+	 * "Performance" option's three-tier mapping below still decides everything; once set it wins over
+	 * that mapping until called again.
+	 */
+	private static volatile Boolean vsyncOverride;
+
 	private FramePacing() {
+	}
+
+	/** See {@link #vsyncOverride}. Called from {@code Display.setVSyncEnabled}, nowhere else. */
+	public static void setVsyncOverride(boolean enabled) {
+		vsyncOverride = enabled;
 	}
 
 	/**
@@ -97,6 +113,9 @@ public final class FramePacing {
 	 * surface's capabilities rather than assuming.
 	 */
 	public static int presentMode() {
+		if (vsyncOverride != null) {
+			return vsyncOverride ? WGPUPresentMode_Fifo() : WGPUPresentMode_Mailbox();
+		}
 		return setting() == MAX_FPS ? WGPUPresentMode_Mailbox() : WGPUPresentMode_Fifo();
 	}
 
@@ -110,6 +129,9 @@ public final class FramePacing {
 	 * own and blits only the latest into a drawable.
 	 */
 	public static boolean uncapped() {
+		if (vsyncOverride != null) {
+			return !vsyncOverride;
+		}
 		return setting() == MAX_FPS;
 	}
 
@@ -121,7 +143,9 @@ public final class FramePacing {
 	 * cost several percent of the budget and make the cap land at 58 rather than 60.
 	 */
 	public static void await() {
-		if (setting() != POWER_SAVER) {
+		// An explicit override bypasses the three-tier mapping entirely -- including its 60 fps
+		// power-saver cap, which "vsync on/off" has no equivalent of.
+		if (vsyncOverride != null || setting() != POWER_SAVER) {
 			nextFrameAt = 0L;
 			return;
 		}
@@ -151,6 +175,10 @@ public final class FramePacing {
 	}
 
 	public static String describe() {
+		if (vsyncOverride != null) {
+			return vsyncOverride ? "vsync forced on (Display.setVSyncEnabled, fifo)"
+				: "vsync forced off (Display.setVSyncEnabled, mailbox)";
+		}
 		return switch (setting()) {
 			case MAX_FPS -> "Max FPS (mailbox, uncapped render)";
 			case POWER_SAVER -> "Power saver (vsync, 60 fps cap)";

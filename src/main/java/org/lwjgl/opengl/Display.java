@@ -655,6 +655,10 @@ public final class Display {
 	}
 
 	public static void update() {
+		// Runs once per call regardless of the branches below, on the render thread that owns this
+		// call: exactly the safe point RetroSettings.setMipmap defers to when a mod enables mipmaps
+		// from off that thread. See RetroSettings#pumpPendingMipmapReupload.
+		com.periut.retrodragon.api.RetroSettings.pumpPendingMipmapReupload();
 		if (SDL) {
 			// RetroCenter window ownership, SDL3 edition. Structurally identical to the GLFW block
 			// below -- same bridge protocol, same three roles (parked hub / child owner / sole
@@ -1236,7 +1240,15 @@ public final class Display {
 	}
 
 
+	/**
+	 * Also feeds {@code FramePacing}: under WebGPU there is no GL swap interval to set (the window is
+	 * created with {@code Sdl3Window.setNoGl(true)}, which makes {@code setSwapInterval} below a
+	 * permanent no-op), and the swapchain's present mode is what actually gates presentation there.
+	 * Without this line a mod calling the classic LWJGL 2 vsync toggle changed nothing under
+	 * RetroDragon's default backend. See {@code FramePacing#vsyncOverride}.
+	 */
 	public static void setVSyncEnabled(boolean enabled) {
+		com.periut.retrodragon.render.FramePacing.setVsyncOverride(enabled);
 		if (SDL) {
 			com.periut.retrodragon.window.sdl.Sdl3Window.setSwapInterval(enabled ? 1 : 0);
 			return;

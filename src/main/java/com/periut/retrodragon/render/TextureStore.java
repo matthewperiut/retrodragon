@@ -1,8 +1,8 @@
 package com.periut.retrodragon.render;
 
+import com.periut.retrodragon.api.RetroSettings;
 import com.periut.retrodragon.gpu.GpuTexture;
 import com.periut.retrodragon.gpu.WebGPUContext;
-import com.periut.retrodragon.Config;
 
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -213,7 +213,7 @@ public final class TextureStore implements AutoCloseable {
 	}
 
 	private static int mipLevelsFor(int name, int width, int height) {
-		if (!Config.MIPMAP || !(loadingTerrain || BlockAtlas.isBlockAtlas(name))) {
+		if (!RetroSettings.isMipmap() || !(loadingTerrain || BlockAtlas.isBlockAtlas(name))) {
 			return 1;
 		}
 		BlockAtlas.observe(width, height);

@@ -619,7 +619,8 @@ tasks.withType(JavaExec).matching { it.name.startsWith('run') }.configureEach {
  'com.periut.retrodragon.render.VertexSink'    : 'vertexSinkTest',
  'com.periut.retrodragon.shim.GlCoverage'      : 'glCoverage',
  'com.periut.retrodragon.shim.PixelStore'      : 'pixelStoreTest',
- 'com.periut.retrodragon.render.LineExpander'  : 'lineExpanderTest'].each { mainName, taskName ->
+ 'com.periut.retrodragon.render.LineExpander'  : 'lineExpanderTest',
+ 'com.periut.retrodragon.api.RetroSettings'    : 'retroSettingsTest'].each { mainName, taskName ->
 	tasks.register(taskName, JavaExec) {
 		group = 'verification'
 		description = "Self-check for ${mainName.tokenize('.').last()}."
@@ -675,7 +676,7 @@ tasks.register('selfChecks') {
 	description = 'Every CPU-side self-check.'
 	dependsOn 'pipelineKeyTest', 'glShimTest', 'glStateTest', 'occlusionTest', 'arenaTest',
 		'vertexSinkTest', 'glCoverage', 'lineExpanderTest', 'blockAtlasTest', 'pixelStoreTest',
-		'noRawGlfwCheck'
+		'retroSettingsTest', 'noRawGlfwCheck'
 }
 
 // The Dawn bring-up check that used to live in retrogpu as ':retrogpu:smokeTest'.
