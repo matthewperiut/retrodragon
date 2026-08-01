@@ -225,9 +225,15 @@ public final class GlShim {
 	private boolean colorMaskAlpha = true;
 
 	/**
-	 * Tracked but not yet in the pipeline key. Beta uses it only for the anaglyph 3D mode, which is
-	 * off by default; folding it into the key would double the pipeline count for a feature nobody
-	 * enables. Kept here so the state is not silently lost when that changes.
+	 * Part of the pipeline key -- see {@link PipelineKey#withColorMask}.
+	 *
+	 * <p>It used to be tracked and dropped, on the reasoning that only anaglyph 3D masks colour. That
+	 * was wrong: fancy graphics (the default) masks all four channels to draw the translucent layer
+	 * as a depth-only pre-pass before drawing it again in colour, and so do fancy clouds. Dropping
+	 * the mask blended both of them twice, which is why water was near opaque.
+	 *
+	 * <p>Costs nothing while the mask is all-on, which is every other draw in the game: that state
+	 * encodes as zero and keys identically to before.
 	 */
 	public void glColorMask(boolean r, boolean g, boolean b, boolean a) {
 		colorMaskRed = r;
@@ -448,8 +454,14 @@ public final class GlShim {
 		// leftover glPolygonOffset must not split the pipeline space while it is disabled.
 		int units = polygonOffsetFill ? Math.round(polygonOffsetUnits) : 0;
 		int slope = polygonOffsetFill ? Math.round(polygonOffsetFactor) : 0;
-		return PipelineKey.of(src, dst, func, write, depthTest, blend, cull(), topology, program,
-			units, slope);
+		return withColorMask(PipelineKey.of(src, dst, func, write, depthTest, blend, cull(), topology,
+			program, units, slope));
+	}
+
+	/** {@link PipelineKey#withColorMask} against the current mask; a no-op while all four are on. */
+	private long withColorMask(long key) {
+		return PipelineKey.withColorMask(key, colorMaskRed, colorMaskGreen, colorMaskBlue,
+			colorMaskAlpha);
 	}
 
 	/**
@@ -510,8 +522,8 @@ public final class GlShim {
 		int dst = blend ? blendDst : 0;
 		int func = depthTest ? depthFunc : 0;
 		boolean write = depthTest && depthWrite;
-		return PipelineKey.of(src, dst, func, write, depthTest, blend, cull(), topology, program,
-			units, slope);
+		return withColorMask(PipelineKey.of(src, dst, func, write, depthTest, blend, cull(), topology,
+			program, units, slope));
 	}
 
 	/**

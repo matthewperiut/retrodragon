@@ -863,6 +863,9 @@ tasks.register('wgslCheck', JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = 'com.periut.retrodragon.gpu.WgslCheck'
 	jvmArgs '--enable-native-access=ALL-UNNAMED'
-	args = [project.findProperty('dir') ?: 'build/wgsl']
+	// Defaults to this project's own programs, so `./gradlew wgslCheck` with no arguments checks the
+	// shaders that ship. build/wgsl was the old default and is nothing until a companion mod dumps
+	// its programs there, so the bare task could only ever fail.
+	args = [project.findProperty('dir') ?: 'src/main/resources/assets/retrodragon/shaders/wgsl']
 	systemProperties System.getProperties().findAll { k, v -> forwarded(k) }
 }

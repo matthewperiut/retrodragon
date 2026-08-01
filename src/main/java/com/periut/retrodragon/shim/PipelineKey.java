@@ -33,6 +33,15 @@ public final class PipelineKey {
 	 */
 	private static final int OFFSET_BITS = 6;
 
+	/**
+	 * The channels {@code glColorMask} has switched OFF, one bit each -- see {@link #withColorMask}.
+	 *
+	 * <p>Stored inverted so that "write everything", which is the state of all but a handful of draws,
+	 * is zero: a key built without touching the mask is bit-identical to one built before this field
+	 * existed, and the pipeline count does not move for any draw that never masks.
+	 */
+	private static final int COLOR_MASK_BITS = 4;
+
 	private static final int TOPOLOGY_BITS = 3;
 	/**
 	 * Six, not four. The three built-in programs left eleven spare slots, which was ample while the
@@ -140,6 +149,7 @@ public final class PipelineKey {
 	private static final int BLEND_SHIFT = DEPTH_TEST_SHIFT + 1;
 	private static final int OFFSET_UNITS_SHIFT = BLEND_SHIFT + 1;
 	private static final int OFFSET_SLOPE_SHIFT = OFFSET_UNITS_SHIFT + OFFSET_BITS;
+	private static final int COLOR_MASK_SHIFT = OFFSET_SLOPE_SHIFT + OFFSET_BITS;
 
 	/** Sign-extends a field packed by {@link #mask}. */
 	private static int signed(long key, int shift, int bits) {
@@ -184,6 +194,38 @@ public final class PipelineKey {
 	public static long withProgram(long key, int program) {
 		long cleared = key & ~(((1L << PROGRAM_BITS) - 1L) << PROGRAM_SHIFT);
 		return cleared | mask(program, PROGRAM_BITS) << PROGRAM_SHIFT;
+	}
+
+	// Channel bits, matching WGPUColorWriteMask so the value can be handed to a colour target as is.
+	public static final int COLOR_WRITE_RED = 1;
+	public static final int COLOR_WRITE_GREEN = 2;
+	public static final int COLOR_WRITE_BLUE = 4;
+	public static final int COLOR_WRITE_ALPHA = 8;
+	public static final int COLOR_WRITE_ALL = 15;
+
+	/**
+	 * The same key with {@code glColorMask} folded in.
+	 *
+	 * <p>Beta masks colour off for real, by default, in two places, and both of them are a
+	 * DEPTH-ONLY PRE-PASS over geometry that is about to be blended: the fancy-graphics translucent
+	 * layer (GameRenderer draws pass 1 masked to lay down depth, then draws it again through
+	 * renderLastChunks with colour on) and fancy clouds. Ignoring the mask draws each of those
+	 * TWICE, and two blends of the same water surface composite as {@code 1 - (1 - a)^2} -- alpha
+	 * 0.6 water lands at 0.84, which reads as water you cannot see through.
+	 *
+	 * <p>Anaglyph 3D masks channels individually, which is why this carries all four bits rather
+	 * than one "colour off" flag.
+	 */
+	public static long withColorMask(long key, boolean r, boolean g, boolean b, boolean a) {
+		int off = (r ? 0 : COLOR_WRITE_RED) | (g ? 0 : COLOR_WRITE_GREEN)
+			| (b ? 0 : COLOR_WRITE_BLUE) | (a ? 0 : COLOR_WRITE_ALPHA);
+		long cleared = key & ~(((1L << COLOR_MASK_BITS) - 1L) << COLOR_MASK_SHIFT);
+		return cleared | mask(off, COLOR_MASK_BITS) << COLOR_MASK_SHIFT;
+	}
+
+	/** The COLOR_WRITE_* bits the pipeline should write; {@link #COLOR_WRITE_ALL} by default. */
+	public static int colorWriteMask(long key) {
+		return COLOR_WRITE_ALL & ~field(key, COLOR_MASK_SHIFT, COLOR_MASK_BITS);
 	}
 
 	/**
@@ -308,6 +350,24 @@ public final class PipelineKey {
 		// the game would be rebuilt under a new key.
 		check(of(9, 10, 3, true, true, true, CULL_BACK, TOPOLOGY_LINE_STRIP, 5, 0, 0) == key,
 			"a zero offset must not change the key");
+
+		// glColorMask. Beta's fancy translucent pre-pass masks all four channels off and draws the
+		// water again with them on; a key that cannot tell those two apart draws water twice.
+		check(colorWriteMask(key) == COLOR_WRITE_ALL, "an untouched mask writes every channel");
+		check(withColorMask(key, true, true, true, true) == key,
+			"an all-on mask must not change the key");
+		long masked = withColorMask(key, false, false, false, false);
+		check(masked != key, "masking colour off must change the pipeline");
+		check(colorWriteMask(masked) == 0, "an all-off mask writes nothing");
+		check(withColorMask(masked, true, true, true, true) == key, "withColorMask round-trips");
+		// Anaglyph masks channels individually, so the bits have to survive one at a time.
+		check(colorWriteMask(withColorMask(key, false, true, true, true))
+			== (COLOR_WRITE_GREEN | COLOR_WRITE_BLUE | COLOR_WRITE_ALPHA), "red off");
+		check(withColorMask(key, false, true, true, true) != withColorMask(key, true, false, true, true),
+			"per-channel masks must not collide");
+		check(blendSrc(masked) == blendSrc(key) && depthWrite(masked) == depthWrite(key)
+			&& program(masked) == program(key) && offsetUnits(masked) == offsetUnits(key),
+			"withColorMask must not disturb any other field");
 
 		// Exhaustive: no two distinct combinations may produce the same key.
 		java.util.HashSet<Long> seen = new java.util.HashSet<>();

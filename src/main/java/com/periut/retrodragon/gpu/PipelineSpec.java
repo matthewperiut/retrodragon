@@ -71,6 +71,16 @@ public final class PipelineSpec {
 	public float depthBiasSlopeScale;
 	public float depthBiasClamp;
 
+	/**
+	 * {@code glColorMask}, as WGPUColorWriteMask bits. All channels by default.
+	 *
+	 * <p>Applies to every target, which is what GL does -- its mask is per-channel, not per-draw
+	 * buffer. Zero is a legal value and the point of the field: it is how a draw contributes depth
+	 * without contributing colour, which beta relies on to keep water and clouds from blending
+	 * with themselves.
+	 */
+	public long colorWriteMask = Flags.COLOR_WRITE_ALL;
+
 	public boolean blend;
 	public int blendSrcColor = WGPUBlendFactor_SrcAlpha();
 	public int blendDstColor = WGPUBlendFactor_OneMinusSrcAlpha();

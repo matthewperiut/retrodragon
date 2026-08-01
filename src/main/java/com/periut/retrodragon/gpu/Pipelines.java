@@ -173,7 +173,7 @@ public final class Pipelines {
 				MemorySegment target = WGPUColorTargetState.asSlice(targets, i);
 				WGPUColorTargetState.format(target,
 					i == 0 ? spec.colorFormat : spec.auxColorFormats[i - 1]);
-				WGPUColorTargetState.writeMask(target, Flags.COLOR_WRITE_ALL);
+				WGPUColorTargetState.writeMask(target, spec.colorWriteMask);
 				// Target 0 only; see PipelineSpec.auxColorFormats for why blending an aux attachment
 				// is not a thing anyone wants.
 				if (spec.blend && i == 0) {

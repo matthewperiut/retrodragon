@@ -20,7 +20,8 @@ import java.util.List;
  * <p>Headless: no window, no surface, no swapchain. Dawn will create a device without any of them,
  * which is what makes this runnable in CI and on a machine with the game closed.
  *
- * <pre>./gradlew wgslCheck -Pdir=build/wgsl</pre>
+ * <pre>./gradlew wgslCheck                  # this project's own programs
+ *./gradlew wgslCheck -Pdir=build/wgsl # a companion mod's dump</pre>
  */
 public final class WgslCheck {
 	private WgslCheck() {

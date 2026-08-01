@@ -400,6 +400,10 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 
 		pipeline.topology = topology(PipelineKey.topology(key));
 		pipeline.cullMode = cull(PipelineKey.cull(key));
+		// glColorMask. Zero for beta's depth-only pre-pass over the translucent layer and over fancy
+		// clouds -- both of which draw the same geometry a second time with colour on, so writing
+		// colour here would blend every water surface and every cloud twice.
+		pipeline.colorWriteMask = PipelineKey.colorWriteMask(key);
 		pipeline.blend = PipelineKey.blend(key);
 		if (pipeline.blend) {
 			pipeline.blendSrcColor = blendFactor(PipelineKey.blendSrc(key));
