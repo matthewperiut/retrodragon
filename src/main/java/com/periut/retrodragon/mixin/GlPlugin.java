@@ -87,6 +87,23 @@ public class GlPlugin implements IMixinConfigPlugin {
 			return net.fabricmc.loader.api.FabricLoader.getInstance()
 				.isModLoaded("station-renderer-api-v0");
 		}
+		// The MC-73186 fix patches a constant inside beta's own held-item extrusion, and StationAPI's
+		// Arsenic renderer @Overwrites the whole method it lives in -- HeldItemRenderer.renderItem
+		// becomes a single call to ArsenicOverlayRenderer.renderItem3D, with beta's four side-wall
+		// loops and the 15.99 texture zoom gone with it. There is nothing left to patch.
+		//
+		// Worse than pointless: Mixin refuses an injection into a method another mixin MERGED unless
+		// the injector outranks it, so at equal priority this is a hard failure during APPLY, and the
+		// config is `required`. Every StationAPI install crashed on startup in 0.1.2 because of it.
+		// Raising our priority would clear the refusal and then fail the `require = 1` instead, since
+		// the constant genuinely is not there any more.
+		//
+		// So the honest gate is "does Arsenic own held-item rendering", and if it does this is not our
+		// method. Any gap in Arsenic's own renderItem3D is a separate bug in a separate renderer.
+		if (mixinClassName.endsWith(".HeldItemGapMixin")) {
+			return !net.fabricmc.loader.api.FabricLoader.getInstance()
+				.isModLoaded("station-renderer-arsenic");
+		}
 		return true;
 	}
 

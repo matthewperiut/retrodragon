@@ -55,6 +55,11 @@ import org.spongepowered.asm.mixin.injection.ModifyConstant;
  *
  * <p>Geometry and UVs only, so it is one fix for both backends -- the WebGPU renderer and the GL one
  * receive the corrected vertices identically.
+ *
+ * <p><b>Not applied when StationAPI's Arsenic renderer is installed.</b> Arsenic {@code @Overwrite}s
+ * {@code renderItem} down to a single call into its own item renderer, so beta's extrusion and the
+ * constant patched here do not exist in that build of the method. {@code GlPlugin.shouldApplyMixin}
+ * makes that call; see there for why leaving it to Mixin is not an option.
  */
 @Mixin(HeldItemRenderer.class)
 public class HeldItemGapMixin {
