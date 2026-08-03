@@ -139,8 +139,8 @@ public class RetroWindowPreLaunch implements PreLaunchEntrypoint {
 					+ java.io.File.pathSeparator + ownJarPath());
 
 			command.add(com.periut.retrodragon.window.MacBootstrap.class.getName());
-			command.addAll(java.util.Arrays.asList(
-					net.fabricmc.loader.impl.FabricLoaderImpl.INSTANCE.getLaunchArguments(false)));
+			command.addAll(unbrandVersionType(java.util.Arrays.asList(
+					net.fabricmc.loader.impl.FabricLoaderImpl.INSTANCE.getLaunchArguments(false))));
 
 			System.out.println("[RetroDragon] macOS SDL3 backend needs thread 0; relaunching through MacBootstrap...");
 			exec(command);
@@ -150,6 +150,40 @@ public class RetroWindowPreLaunch implements PreLaunchEntrypoint {
 			Configuration.GLFW_CHECK_THREAD0.set(false);
 			Configuration.GLFW_LIBRARY_NAME.set("glfw_async");
 		}
+	}
+
+	/**
+	 * Takes loader's own {@code /Fabric} back off {@code --versionType} before the arguments are handed
+	 * to the relaunched JVM.
+	 *
+	 * <p>The arguments forwarded here are not the ones this process was started with, they are the ones
+	 * loader has already rewritten. {@code MinecraftGameProvider} turns {@code --versionType} into
+	 * {@code "Fabric"} when it is absent or {@code release}, and into {@code "<old>/Fabric"} otherwise,
+	 * so feeding its own output back to a second loader appends a second time and the title screen reads
+	 * {@code Beta 1.7.3/Fabric/Fabric}. It compounds: a third launch would say it three times.
+	 *
+	 * <p>The bug is as old as the relaunch, but nothing read the value until now, which is why it only
+	 * became visible when OSL's client entrypoints started running again (see
+	 * {@code HeadlessLaunch.invokeOslEntrypoints}) and the branding module could finally act on it.
+	 *
+	 * <p>Undoing the rewrite rather than suppressing the symptom: the child's loader then makes exactly
+	 * the same decision on the same input this one did.
+	 */
+	private static java.util.List<String> unbrandVersionType(java.util.List<String> args) {
+		java.util.List<String> fixed = new java.util.ArrayList<>(args);
+		int flag = fixed.indexOf("--versionType");
+		if (flag < 0 || flag + 1 >= fixed.size()) {
+			return fixed;
+		}
+		String value = fixed.get(flag + 1);
+		if (value.equals("Fabric")) {
+			// Loader invented the whole value; drop the argument so the child invents it identically.
+			fixed.remove(flag + 1);
+			fixed.remove(flag);
+		} else if (value.endsWith("/Fabric")) {
+			fixed.set(flag + 1, value.substring(0, value.length() - "/Fabric".length()));
+		}
+		return fixed;
 	}
 
 	/** Filesystem path of the jar (or classes dir, in dev) this mod was loaded from. */

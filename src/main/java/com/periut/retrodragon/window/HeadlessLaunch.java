@@ -23,6 +23,10 @@ public final class HeadlessLaunch {
 	public static void start(String[] args) {
 		adoptLoaderGameDir();
 
+		// The applet's init() is also where OSL dispatches every mod's init entrypoint, and skipping
+		// the applet skipped that too. See invokeOslEntrypoints.
+		invokeOslEntrypoints(args);
+
 		java.util.Map<String, String> a = new java.util.HashMap<>();
 		for (int i = 0; i < args.length; i++) {
 			if (args[i].startsWith("--") && i + 1 < args.length && !args[i + 1].startsWith("--")) {
@@ -121,6 +125,75 @@ public final class HeadlessLaunch {
 	}
 
 	/** Shared with {@link MacBootstrap}; keep in sync on both sides. */
+	/**
+	 * Runs the {@code init} and {@code client-init} entrypoints, and OSL's launch events, exactly where
+	 * the applet path runs them: at the head of what would have been {@code MinecraftApplet.init}, before
+	 * the game object exists.
+	 *
+	 * <p>This is not an optional nicety, it is the one thing the applet did that nothing else does. OSL
+	 * dispatches every mod's client-side initialisation from a single {@code @Inject} at the head of
+	 * {@code MinecraftApplet.init}. Skipping the applet skipped the dispatch, so on macOS every OSL mod
+	 * silently never initialised: RetroAPI registered no blocks, no items and no recipes, and the game
+	 * came up vanilla with the mods listed in the log and no error anywhere. It is a quiet failure by
+	 * construction, because a mod that never runs cannot complain.
+	 *
+	 * <p>Reflective and guarded, because RetroDragon does not depend on OSL and has to keep running
+	 * without it. It cannot double-fire: this path exists precisely because the applet one is not taken.
+	 */
+	private static void invokeOslEntrypoints(String[] args) {
+		net.fabricmc.loader.api.FabricLoader loader = net.fabricmc.loader.api.FabricLoader.getInstance();
+		if (!loader.isModLoaded("osl-entrypoints")) {
+			return;
+		}
+		invokeEntrypoint(loader, "net.ornithemc.osl.entrypoints.api.ModInitializer", "init");
+		invokeEntrypoint(loader, "net.ornithemc.osl.entrypoints.api.client.ClientModInitializer", "initClient");
+
+		// The launch-argument events, which is how OSL mods read their own command line options.
+		try {
+			Class<?> launchUtils = Class.forName("net.ornithemc.osl.entrypoints.impl.launch.LaunchUtils");
+			launchUtils.getMethod("triggerLaunchEvents", String[].class)
+				.invoke(null, (Object) loader.getLaunchArguments(false));
+		} catch (ReflectiveOperationException | LinkageError e) {
+			System.err.println("[RetroDragon] could not trigger OSL launch events: " + e);
+		}
+	}
+
+	private static void invokeEntrypoint(net.fabricmc.loader.api.FabricLoader loader, String type, String method) {
+		Class<?> initializer;
+		try {
+			initializer = Class.forName(type);
+		} catch (ClassNotFoundException | LinkageError e) {
+			return; // a partial OSL install: nothing to dispatch to
+		}
+		String key;
+		java.lang.reflect.Method call;
+		try {
+			key = (String) initializer.getField("ENTRYPOINT_KEY").get(null);
+			call = initializer.getMethod(method);
+		} catch (ReflectiveOperationException e) {
+			System.err.println("[RetroDragon] unrecognised OSL entrypoint interface " + type + ": " + e);
+			return;
+		}
+
+		// Only the OSL half needs reflection. Loader's own containers are its public API, and going
+		// through getClass() on those instead lands on loader-internal implementation classes that
+		// reflection is not allowed to touch.
+		for (net.fabricmc.loader.api.entrypoint.EntrypointContainer<?> container
+				: loader.getEntrypointContainers(key, initializer)) {
+			String modId = container.getProvider().getMetadata().getId();
+			try {
+				call.invoke(container.getEntrypoint());
+			} catch (java.lang.reflect.InvocationTargetException e) {
+				// A mod failing its own initialisation is that mod's problem, and it should look like
+				// one: rethrow so the crash names it rather than a window class it never heard of.
+				throw new RuntimeException("Mod '" + modId + "' failed in its '" + key + "' entrypoint",
+					e.getCause());
+			} catch (IllegalAccessException e) {
+				System.err.println("[RetroDragon] could not run '" + key + "' for " + modId + ": " + e);
+			}
+		}
+	}
+
 	public static final String GAME_THREAD_KEY = "retrowindow.gameThread";
 
 	private static int intOr(String value, int fallback) {
