@@ -22,9 +22,12 @@ import org.lwjgl.opengl.GL12;
  *  - **Solidify** -- before averaging, every transparent texel takes the colour of a nearby opaque
  *    neighbour. Alpha stays 0, so nothing looks different at level 0; it only changes what the
  *    averaging pulls in.
- *  - **Coverage rescale** (Castaño) -- averaging alpha shrinks the fraction of texels that survive
- *    the 0.5 alpha test, so leaves and grass visibly thin out and disappear with distance. After
- *    each downsample, alpha is scaled so the surviving fraction matches level 0.
+ *  - **Coverage restore** (Castaño) -- averaging alpha moves the fraction of texels that survive the
+ *    alpha test, so a cutout changes shape with distance: at beta's 0.1 threshold a box filter grows
+ *    it, until glass and leaves read as solid blocks. After each downsample, each tile's alpha is
+ *    remapped so the surviving fraction matches level 0 again. See {@link Mipmapper} for why the
+ *    threshold that is counted against is half rather than beta's 0.1, and {@link SectionDrawer} for
+ *    the other half of that -- the cutout pass tests against the same number.
  *
  * A 2x2 box filter cannot cross a tile boundary here: the grid PITCH stays even at every level the
  * chain is allowed to reach, so a 2x2 block always lies inside one tile. No per-tile special-casing

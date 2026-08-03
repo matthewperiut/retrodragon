@@ -69,10 +69,10 @@ public final class AnimatedMipmaps {
 		}
 
 		int pixels = width * height;
-		// EXACTLY the tile, not "at least". Mipmapper.coverage() measures the surviving alpha
-		// fraction over the whole array, so a buffer left oversized by an earlier, larger tile would
-		// fold stale trailing texels into the rescale. Tile size does not change in practice, so this
-		// allocates once per session rather than per tick.
+		// EXACTLY the tile, not "at least". The tile goes in as a one-tile sheet, so Mipmapper reads
+		// the whole array as the region whose coverage it has to hold, and a buffer left oversized by
+		// an earlier, larger tile would fold stale trailing texels into that. Tile size does not
+		// change in practice, so this allocates once per session rather than per tick.
 		if (argbScratch.length != pixels) {
 			argbScratch = new int[pixels];
 		}
@@ -89,12 +89,12 @@ public final class AnimatedMipmaps {
 		}
 
 		// The tile is handed to Mipmapper as a one-tile sheet: pitch == width. The 2x2 box never
-		// crosses a tile boundary either way, so the filter is identical to the whole-atlas build.
-		// solidify and the coverage rescale now see one tile rather than the sheet, which for the
-		// tiles that animate is moot -- lava, water, fire and portal are fully opaque, so solidify is
-		// a no-op -- and for a transparent mcmeta animation is the better answer anyway: no colour
-		// can be dragged in from a neighbouring sprite, which is what the shader's per-tile clamp
-		// already assumes.
+		// crosses a tile boundary either way, and coverage is restored per tile in both cases, so this
+		// is exactly what the whole-atlas build would have done to the same texels. solidify sees one
+		// tile rather than the sheet, which for the tiles that animate is moot -- lava, water, fire
+		// and portal are fully opaque, so it is a no-op -- and for a transparent mcmeta animation is
+		// the better answer anyway: no colour can be dragged in from a neighbouring sprite, which is
+		// what the shader's per-tile clamp already assumes.
 		// argbScratch is handed to build() directly even though solidify MUTATES it: it is refilled
 		// from the caller's buffer on every call, and chain[0] -- the mutated level 0 -- is never
 		// uploaded. A defensive copy here would be one allocation per animated tile per tick for

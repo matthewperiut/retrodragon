@@ -22,6 +22,35 @@ import org.lwjgl.opengl.GL15;
  * done now because it is an allocator's worth of complexity for an unmeasured win.
  */
 public final class SectionDrawer {
+	/**
+	 * The alpha the CUTOUT pass tests against, in place of beta's own 0.1, and only for that pass.
+	 *
+	 * <p>Beta compares an unfiltered texel against 0.1, which is fine when alpha is only ever 0 or 1.
+	 * Every form of filtering this renderer added -- the mip chain, RGSS's four taps, alpha-to-coverage
+	 * -- produces alpha BETWEEN the two, and at 0.1 anything a filter so much as touched still counts
+	 * as solid: a quarter-covered texel passes, so a cutout grows a texel at every mip level. On
+	 * vanilla terrain.png that took glass from 27.7% covered to fully solid three levels down, which
+	 * is a window that stops being a window as you walk away from it.
+	 *
+	 * <p>Half is the only threshold with no bias in either direction -- a filtered texel survives when
+	 * more than half of what it averaged was solid -- and it is what {@link Mipmapper} restores each
+	 * tile's coverage against. The two are the same number and have to move together.
+	 *
+	 * <p>Level 0 is unaffected on any vanilla or HD sheet: the only fractional alphas in beta's atlas
+	 * are water, ice and the break overlay, none of which is drawn in this pass.
+	 */
+	private static final float CUTOUT_ALPHA_REF = Mipmapper.CUTOFF / 255.0F;
+
+	/**
+	 * What beta leaves the alpha ref at for everything else, restored after the cutout pass.
+	 *
+	 * <p>{@code EntityRenderer} sets it exactly twice -- 0.01 around the weather pass, then back to
+	 * this -- so this is the standing value at the point terrain is drawn, and the value the
+	 * translucent pass below wants: water and ice carry a real fractional alpha (0.53 and 0.62) that
+	 * a half-way test would be far too close to.
+	 */
+	private static final float BETA_ALPHA_REF = 0.1F;
+
 	private static final List<ChunkBuilder> visible = new ArrayList<>();
 	private static final boolean DIAG = Boolean.getBoolean("retroperf.diag");
 	/** Artifact hunting: bit 0 = opaque layer, bit 1 = translucent layer. Default draws both. */
@@ -135,6 +164,9 @@ public final class SectionDrawer {
 		// through the alpha test. Layer 1 is genuinely translucent and must keep blending.
 		if (layer == 0) {
 			AntiAliasing.beginCutout();
+			// Both backends: under WebGPU this reaches the shim's tracked state and comes out as the
+			// terrain pipeline's discard threshold, under GL it is the fixed-function alpha test.
+			GL11.glAlphaFunc(GL11.GL_GREATER, CUTOUT_ALPHA_REF);
 		}
 		// Our own program, when enabled: it is the only way to get a stable mip level on beta's
 		// atlas. Falls back to fixed function on any compile/link failure.
@@ -189,6 +221,9 @@ public final class SectionDrawer {
 		}
 		if (layer == 0) {
 			AntiAliasing.endCutout();
+			// Everything after this -- the translucent pass, entities, the block-breaking overlay, the
+			// held item -- is beta's own drawing and expects beta's own threshold back.
+			GL11.glAlphaFunc(GL11.GL_GREATER, BETA_ALPHA_REF);
 		}
 		return drawn;
 	}
