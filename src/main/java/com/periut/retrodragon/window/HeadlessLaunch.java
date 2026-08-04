@@ -28,9 +28,12 @@ public final class HeadlessLaunch {
 		invokeOslEntrypoints(args);
 
 		java.util.Map<String, String> a = new java.util.HashMap<>();
+		java.util.List<String> loose = new java.util.ArrayList<>();
 		for (int i = 0; i < args.length; i++) {
 			if (args[i].startsWith("--") && i + 1 < args.length && !args[i + 1].startsWith("--")) {
 				a.put(args[i].substring(2), args[++i]);
+			} else {
+				loose.add(args[i]);
 			}
 		}
 
@@ -38,8 +41,7 @@ public final class HeadlessLaunch {
 		int height = intOr(a.get("height"), 480);
 
 		BrnoMinecraft minecraft = new BrnoMinecraft(width, height, false);
-		String username = a.getOrDefault("username", "Player" + System.currentTimeMillis() % 10000);
-		minecraft.session = new Session(username, a.getOrDefault("session", ""));
+		minecraft.session = new Session(username(a, loose), sessionId(a, loose));
 		// Beta appends this to skin/cape URLs; the applet took it from the document base, which a
 		// headless launch has no equivalent of. Empty is what the offline path effectively used.
 		minecraft.hostAddress = "";
@@ -47,6 +49,18 @@ public final class HeadlessLaunch {
 
 		if (a.containsKey("server") && a.containsKey("port")) {
 			minecraft.setStartupServer(a.get("server"), intOr(a.get("port"), 25565));
+		}
+
+		// RetroCenter: a child instance reuses the hub's authenticated session (retroauth
+		// re-derives its auth state from the raw sessionId string) and autoconnects to its
+		// assigned server, exactly as MinecraftAppletMixin.init does on the applet path.
+		com.periut.retrodragon.retrocenter.bridge.ChildConfig childConfig =
+				com.periut.retrodragon.retrocenter.bridge.HubBridge.childConfig();
+		if (com.periut.retrodragon.retrocenter.RetroCenter.isChildInstance() && childConfig != null) {
+			minecraft.session = new Session(childConfig.username, childConfig.sessionId);
+			minecraft.setStartupServer(childConfig.host, childConfig.port);
+			System.out.println("[RetroCenter] child session + autoconnect configured for "
+					+ childConfig.host + ":" + childConfig.port);
 		}
 
 		// Still its own thread, exactly as the applet path did: thread 0 belongs to SDL3 and must
@@ -195,6 +209,41 @@ public final class HeadlessLaunch {
 	}
 
 	public static final String GAME_THREAD_KEY = "retrowindow.gameThread";
+
+	/**
+	 * The launcher's player name, or a throwaway one when the game was started without credentials.
+	 *
+	 * <p>Pre-1.6 versions have no named arguments for this. Prism, and every other launcher that
+	 * speaks b1.7.3, passes the pair positionally ahead of the flags:
+	 * {@code <username> <session> --gameDir ... --assetsDir ...}, which is exactly what the version
+	 * manifest asks for ({@code "${auth_player_name} ${auth_session} --gameDir ..."}). Loader keeps
+	 * those two as leftovers and its {@code AppletFrame} reads the pair back out of them; a launch
+	 * that skips the applet, as this one must, has to do the same or it throws the credentials away.
+	 *
+	 * <p>Note the positional pair does not stay at the front. Loader parses the command line into
+	 * named values plus leftovers and rebuilds it in that order, so by the time it reaches this
+	 * method the credentials trail the flags. Reading them by index would be wrong; they are
+	 * whatever the flag pass did not consume.
+	 *
+	 * <p>{@code --username} and {@code --session} still win where a launcher sends them, so this
+	 * only adds a fallback and cannot regress a launcher that was already working.
+	 */
+	private static String username(java.util.Map<String, String> named, java.util.List<String> loose) {
+		String username = named.get("username");
+		if (username == null && !named.containsKey("session") && loose.size() == 2) {
+			username = loose.get(0);
+		}
+		return username != null ? username : "Player" + System.currentTimeMillis() % 10000;
+	}
+
+	/** The launcher's session token, in the same two shapes as {@link #username}. Empty is offline. */
+	private static String sessionId(java.util.Map<String, String> named, java.util.List<String> loose) {
+		String session = named.get("session");
+		if (session == null && loose.size() == 2) {
+			session = loose.get(1);
+		}
+		return session != null ? session : "";
+	}
 
 	private static int intOr(String value, int fallback) {
 		try {
