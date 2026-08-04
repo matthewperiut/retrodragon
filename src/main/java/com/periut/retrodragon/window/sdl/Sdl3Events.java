@@ -96,8 +96,16 @@ public final class Sdl3Events {
 		switch (event.type()) {
 			case SDLEvents.SDL_EVENT_QUIT, SDLEvents.SDL_EVENT_WINDOW_CLOSE_REQUESTED ->
 				closeRequested = true;
-			case SDLEvents.SDL_EVENT_WINDOW_FOCUS_GAINED -> focused = true;
-			case SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST -> focused = false;
+			// The hotkey suppression follows focus as well as the grab: whatever the game is doing,
+			// the system's shortcuts belong to whichever application the player is actually in.
+			case SDLEvents.SDL_EVENT_WINDOW_FOCUS_GAINED -> {
+				focused = true;
+				com.periut.retrodragon.window.MacSystemHotkeys.setFocused(true);
+			}
+			case SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST -> {
+				focused = false;
+				com.periut.retrodragon.window.MacSystemHotkeys.setFocused(false);
+			}
 			// Anything that can change the framebuffer's PIXEL size. The last three matter on macOS
 			// and are why this list is not just RESIZED: dragging a window from a 1x display onto a
 			// Retina one leaves the window the same size in POINTS, so RESIZED may never fire, while

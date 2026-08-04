@@ -217,6 +217,9 @@ public final class Sdl3Input {
 			org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode(Sdl3Window.handle(), grab));
 		// Grabbed means no screen is open, which is exactly when characters are not wanted.
 		setTextInput(!grab);
+		// ... and it is equally the window in which macOS's own shortcuts must not outrank a key
+		// bind. Ctrl+space is the language picker to the system and sprint+jump to the player.
+		com.periut.retrodragon.window.MacSystemHotkeys.setGrabbed(grab);
 		// Deltas accumulated while switching modes describe the jump to/from the warp position, not
 		// player intent; dropping them stops the view snapping on every menu open and close.
 		deltaX = 0;

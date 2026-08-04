@@ -709,6 +709,10 @@ public final class Sdl3Window {
 	}
 
 	public static void destroy() {
+		// Hand the system's shortcuts back before anything else can fail and skip it. Process exit
+		// would restore them anyway, but not in time for a run that tears the window down and keeps
+		// the JVM alive.
+		com.periut.retrodragon.window.MacSystemHotkeys.release();
 		// Before anything else: whoever owns a surface over this window must release it while the
 		// window and its layer still exist. See setShutdownHook.
 		if (shutdownHook != null) {
