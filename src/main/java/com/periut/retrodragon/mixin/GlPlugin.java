@@ -122,6 +122,7 @@ public class GlPlugin implements IMixinConfigPlugin {
 		if (!TARGETS.contains(targetClassName) || !RenderBackend.isWebGpu()) {
 			return;
 		}
+		String simpleName = targetClassName.substring(targetClassName.lastIndexOf('.') + 1);
 		int forwarded = 0;
 		int stubbed = 0;
 		for (MethodNode method : targetClass.methods) {
@@ -130,7 +131,7 @@ public class GlPlugin implements IMixinConfigPlugin {
 			if (!method.name.startsWith("gl") || (method.access & Opcodes.ACC_STATIC) == 0) {
 				continue;
 			}
-			if (rewrite(method, forwards(targetClassName, method))) {
+			if (rewrite(method, forwards(targetClassName, method), tripwire(simpleName, method))) {
 				if (forwards(targetClassName, method)) {
 					forwarded++;
 				} else {
@@ -151,7 +152,23 @@ public class GlPlugin implements IMixinConfigPlugin {
 			&& bridgeMethods().contains(method.name + method.desc);
 	}
 
-	private static boolean rewrite(MethodNode method, boolean forward) {
+	/**
+	 * What a neutralised method should announce on its first call, or null to stay silent.
+	 *
+	 * <p>Silent is reserved for the entry points {@link com.periut.retrodragon.shim.GlCoverage}
+	 * excuses -- each one a written claim that doing nothing is correct. Everything else gets a
+	 * one-time warning naming the exact method, because a silently missing entry point does not
+	 * crash: the game just quietly stops doing one thing, and the only other way to find it is
+	 * someone noticing a picture is wrong.
+	 */
+	private static String tripwire(String simpleName, MethodNode method) {
+		if (com.periut.retrodragon.shim.GlCoverage.excusedNames().contains(method.name)) {
+			return null;
+		}
+		return simpleName + "." + method.name + method.desc;
+	}
+
+	private static boolean rewrite(MethodNode method, boolean forward, String tripwire) {
 		InsnList body = new InsnList();
 		Type[] arguments = Type.getArgumentTypes(method.desc);
 		Type returnType = Type.getReturnType(method.desc);
@@ -167,6 +184,11 @@ public class GlPlugin implements IMixinConfigPlugin {
 		} else {
 			for (Type argument : arguments) {
 				locals += argument.getSize();
+			}
+			if (tripwire != null) {
+				body.add(new org.objectweb.asm.tree.LdcInsnNode(tripwire));
+				body.add(new MethodInsnNode(Opcodes.INVOKESTATIC, BRIDGE, "unimplemented",
+					"(Ljava/lang/String;)V", false));
 			}
 			pushDefault(body, returnType);
 			body.add(new InsnNode(returnType.getOpcode(Opcodes.IRETURN)));

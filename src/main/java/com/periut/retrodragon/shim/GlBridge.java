@@ -145,6 +145,44 @@ public final class GlBridge {
 		shim().glViewport(x, y, width, height);
 	}
 
+	// --- attrib stack ------------------------------------------------------------------------------
+	//
+	// beta itself never pushes attribs -- it restores state by hand -- but mods that wrap a scene in
+	// push/pop restore almost nothing by hand, and a stubbed pop leaves their whole scene's state
+	// live for the rest of the frame. The shim owns every field involved, so this is pure state.
+
+	public static void glPushAttrib(int mask) {
+		shim().glPushAttrib(mask);
+	}
+
+	public static void glPopAttrib() {
+		shim().glPopAttrib();
+	}
+
+	// --- tripwire ----------------------------------------------------------------------------------
+
+	/**
+	 * The body {@code GlPlugin} gives an entry point nothing implements, unless {@code GlCoverage}
+	 * excuses it.
+	 *
+	 * <p>An empty body is still the right BEHAVIOUR for those -- there is no driver to fall back on
+	 * -- but silence was the wrong diagnostic: a mod calling a missing entry point does not crash or
+	 * misdraw loudly, the game just quietly stops doing one thing, and four shim bugs plus one mod
+	 * incompatibility (OldMCLogo) were each found only by someone noticing a picture was wrong.
+	 * One line naming the exact method turns that hunt into a log read.
+	 */
+	public static void unimplemented(String signature) {
+		if (UNIMPLEMENTED_REPORTED.add(signature)) {
+			com.periut.retrodragon.RetroDragon.LOGGER.warn(
+				"{} is not implemented by the WebGPU shim; whatever calls it (most likely a mod)"
+					+ " will not draw what it intended", signature);
+		}
+	}
+
+	/** One warning per signature for the life of the process; the add is the only per-call cost. */
+	private static final java.util.Set<String> UNIMPLEMENTED_REPORTED =
+		java.util.concurrent.ConcurrentHashMap.newKeySet();
+
 	// --- fog ---------------------------------------------------------------------------------------
 
 	public static void glFogf(int name, float value) {

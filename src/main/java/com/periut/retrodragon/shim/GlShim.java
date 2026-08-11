@@ -299,6 +299,208 @@ public final class GlShim {
 		state.color(r, g, b, 1.0F);
 	}
 
+	// --- attrib stack -----------------------------------------------------------------------------
+	//
+	// glPushAttrib/glPopAttrib. Under GL the driver snapshots the named state groups; here the shim
+	// is the sole authority on every one of them, so a push is a copy of its own fields and a pop
+	// writes them back -- no driver round-trip exists to make this expensive.
+	//
+	// Unported mods lean on this hard. OldMCLogo wraps its title-screen scene in
+	// push(ENABLE|COLOR_BUFFER|DEPTH_BUFFER|TEXTURE) and restores almost nothing by hand; under a
+	// silent stub the pop did nothing, so depth testing stayed on and its glow pass's SRC_COLOR/ONE
+	// blend func stayed live for every GUI element drawn after it.
+
+	private static final int GL_CURRENT_BIT = 0x00001;
+	private static final int GL_LINE_BIT = 0x00004;
+	private static final int GL_POLYGON_BIT = 0x00008;
+	private static final int GL_LIGHTING_BIT = 0x00040;
+	private static final int GL_FOG_BIT = 0x00080;
+	private static final int GL_DEPTH_BUFFER_BIT = 0x00100;
+	private static final int GL_VIEWPORT_BIT = 0x00800;
+	private static final int GL_TRANSFORM_BIT = 0x01000;
+	private static final int GL_ENABLE_BIT = 0x02000;
+	private static final int GL_COLOR_BUFFER_BIT = 0x04000;
+	private static final int GL_TEXTURE_BIT = 0x40000;
+
+	/** GL's own minimum is 16; anything past this depth is a leak, not a scene. */
+	private static final int MAX_ATTRIB_DEPTH = 64;
+
+	private final java.util.ArrayDeque<AttribState> attribStack = new java.util.ArrayDeque<>();
+
+	/** One saved level: everything the shim tracks, plus the mask that decides what pop restores. */
+	private static final class AttribState {
+		int mask;
+		boolean blend;
+		int blendSrc;
+		int blendDst;
+		boolean depthTest;
+		boolean depthWrite;
+		int depthFunc;
+		boolean cullEnabled;
+		int cullFace;
+		boolean polygonOffsetFill;
+		float polygonOffsetFactor;
+		float polygonOffsetUnits;
+		int boundTexture;
+		float lineWidth;
+		int viewportX;
+		int viewportY;
+		int viewportWidth;
+		int viewportHeight;
+		float clearRed;
+		float clearGreen;
+		float clearBlue;
+		float clearAlpha;
+		boolean maskRed;
+		boolean maskGreen;
+		boolean maskBlue;
+		boolean maskAlpha;
+		boolean textureEnabled;
+		boolean lightingEnabled;
+		boolean fogEnabled;
+		boolean alphaTestEnabled;
+		float alphaRef;
+		int fogMode;
+		float fogStart;
+		float fogEnd;
+		float fogDensity;
+		final float[] fogColor = new float[4];
+		final float[] color = new float[4];
+		int matrixMode;
+	}
+
+	/**
+	 * Saves everything, restores by mask. GL scopes the SAVE to the mask too, but saving the whole
+	 * snapshot is a few dozen fields with no driver behind them, and it removes any chance of a
+	 * group boundary being drawn in the wrong place -- several enables legitimately belong to two
+	 * groups at once.
+	 */
+	public void glPushAttrib(int mask) {
+		if (attribStack.size() >= MAX_ATTRIB_DEPTH) {
+			// GL_STACK_OVERFLOW: the push is refused and state is untouched.
+			return;
+		}
+		AttribState s = new AttribState();
+		s.mask = mask;
+		s.blend = blend;
+		s.blendSrc = blendSrc;
+		s.blendDst = blendDst;
+		s.depthTest = depthTest;
+		s.depthWrite = depthWrite;
+		s.depthFunc = depthFunc;
+		s.cullEnabled = cullEnabled;
+		s.cullFace = cullFace;
+		s.polygonOffsetFill = polygonOffsetFill;
+		s.polygonOffsetFactor = polygonOffsetFactor;
+		s.polygonOffsetUnits = polygonOffsetUnits;
+		s.boundTexture = boundTexture;
+		s.lineWidth = lineWidth;
+		s.viewportX = viewportX;
+		s.viewportY = viewportY;
+		s.viewportWidth = viewportWidth;
+		s.viewportHeight = viewportHeight;
+		s.clearRed = clearRed;
+		s.clearGreen = clearGreen;
+		s.clearBlue = clearBlue;
+		s.clearAlpha = clearAlpha;
+		s.maskRed = colorMaskRed;
+		s.maskGreen = colorMaskGreen;
+		s.maskBlue = colorMaskBlue;
+		s.maskAlpha = colorMaskAlpha;
+		s.textureEnabled = state.textured();
+		s.lightingEnabled = state.lit();
+		s.fogEnabled = state.fogEnabled();
+		s.alphaTestEnabled = state.alphaTestEnabled();
+		s.alphaRef = state.alphaRef();
+		s.fogMode = fogMode;
+		s.fogStart = fogStart;
+		s.fogEnd = fogEnd;
+		s.fogDensity = fogDensity;
+		state.getFogColor(s.fogColor);
+		state.getColor(s.color);
+		s.matrixMode = state.matrixMode();
+		attribStack.push(s);
+	}
+
+	public void glPopAttrib() {
+		AttribState s = attribStack.poll();
+		if (s == null) {
+			// GL_STACK_UNDERFLOW: state is left as it is.
+			return;
+		}
+		int mask = s.mask;
+		if ((mask & GL_ENABLE_BIT) != 0) {
+			blend = s.blend;
+			depthTest = s.depthTest;
+			cullEnabled = s.cullEnabled;
+			polygonOffsetFill = s.polygonOffsetFill;
+			state.setTextureEnabled(s.textureEnabled);
+			state.setLightingEnabled(s.lightingEnabled);
+			state.setFogEnabled(s.fogEnabled);
+			state.setAlphaTestEnabled(s.alphaTestEnabled);
+		}
+		if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
+			blend = s.blend;
+			blendSrc = s.blendSrc;
+			blendDst = s.blendDst;
+			colorMaskRed = s.maskRed;
+			colorMaskGreen = s.maskGreen;
+			colorMaskBlue = s.maskBlue;
+			colorMaskAlpha = s.maskAlpha;
+			clearRed = s.clearRed;
+			clearGreen = s.clearGreen;
+			clearBlue = s.clearBlue;
+			clearAlpha = s.clearAlpha;
+			state.setAlphaTestEnabled(s.alphaTestEnabled);
+			state.setAlphaRef(s.alphaRef);
+		}
+		if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
+			depthTest = s.depthTest;
+			depthFunc = s.depthFunc;
+			depthWrite = s.depthWrite;
+		}
+		if ((mask & GL_POLYGON_BIT) != 0) {
+			cullEnabled = s.cullEnabled;
+			cullFace = s.cullFace;
+			polygonOffsetFill = s.polygonOffsetFill;
+			polygonOffsetFactor = s.polygonOffsetFactor;
+			polygonOffsetUnits = s.polygonOffsetUnits;
+		}
+		if ((mask & GL_TEXTURE_BIT) != 0) {
+			boundTexture = s.boundTexture;
+			state.setTextureEnabled(s.textureEnabled);
+		}
+		if ((mask & GL_CURRENT_BIT) != 0) {
+			state.color(s.color[0], s.color[1], s.color[2], s.color[3]);
+		}
+		if ((mask & GL_FOG_BIT) != 0) {
+			state.setFogEnabled(s.fogEnabled);
+			fogMode = s.fogMode;
+			fogStart = s.fogStart;
+			fogEnd = s.fogEnd;
+			fogDensity = s.fogDensity;
+			state.setFog(fogMode, fogStart, fogEnd, fogDensity);
+			state.setFogColor(s.fogColor[0], s.fogColor[1], s.fogColor[2], s.fogColor[3]);
+		}
+		if ((mask & GL_LIGHTING_BIT) != 0) {
+			// The enable only. The light directions and ambient are not snapshotted: beta re-sends
+			// them every time it turns lighting on, so a stale direction cannot survive a frame.
+			state.setLightingEnabled(s.lightingEnabled);
+		}
+		if ((mask & GL_LINE_BIT) != 0) {
+			lineWidth = s.lineWidth;
+		}
+		if ((mask & GL_VIEWPORT_BIT) != 0) {
+			viewportX = s.viewportX;
+			viewportY = s.viewportY;
+			viewportWidth = s.viewportWidth;
+			viewportHeight = s.viewportHeight;
+		}
+		if ((mask & GL_TRANSFORM_BIT) != 0) {
+			state.matrixMode(s.matrixMode);
+		}
+	}
+
 	// --- enable / disable -------------------------------------------------------------------------
 
 	public void glEnable(int cap) {
@@ -595,6 +797,40 @@ public final class GlShim {
 		gl.glPopMatrix();
 		tx = gl.uniforms(false).asFloatBuffer().get(12);
 		check(Math.abs(tx) < 1e-5, "pop restores the modelview, got " + tx);
+
+		// --- attrib stack -----------------------------------------------------------------------
+		//
+		// The sequence OldMCLogo performs, compressed: push the GUI's state, reconfigure everything
+		// for a depth-tested 3D scene, pop, and expect the GUI's state back.
+		gl.glDisable(0x0B71);             // GL_DEPTH_TEST off, as the GUI has it
+		gl.glBlendFunc(0x0302, 0x0303);   // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+		gl.glBindTexture(0x0DE1, 7);
+		long guiKey = gl.pipelineKey();
+
+		gl.glPushAttrib(0x02000 | 0x04000 | 0x00100 | 0x40000); // ENABLE|COLOR|DEPTH|TEXTURE
+		gl.glEnable(0x0B71);
+		gl.glDepthMask(true);
+		gl.glBlendFunc(0x0300, 1);        // SRC_COLOR, ONE -- the logo's glow pass
+		gl.glBindTexture(0x0DE1, 42);
+		gl.glViewport(0, 400, 800, 120);
+		check(gl.pipelineKey() != guiKey, "the pushed scene really changed the pipeline");
+		gl.glPopAttrib();
+
+		check(gl.pipelineKey() == guiKey, "pop restores the pipeline-defining state");
+		check(gl.boundTexture() == 7, "pop restores the bound texture");
+		check(gl.viewportY() == 400, "viewport was NOT in the mask, so pop must leave it alone");
+
+		// A pop must honour the mask, not the snapshot: state outside the pushed groups survives.
+		gl.glPushAttrib(0x00100);         // DEPTH_BUFFER_BIT only
+		gl.glEnable(0x0BE2);
+		gl.glBlendFunc(0x0306, 1);
+		long blendKey = gl.pipelineKey();
+		gl.glPopAttrib();
+		check(gl.pipelineKey() == blendKey, "blend state outside the mask survives the pop");
+
+		// Underflow is a no-op, not a crash -- GL records an error and leaves state untouched.
+		gl.glPopAttrib();
+		check(gl.pipelineKey() == blendKey, "pop on an empty stack leaves state untouched");
 
 		System.out.println("GlShim self-check OK");
 	}

@@ -69,6 +69,73 @@ public final class DrawList {
 	 */
 	private int[] phase = new int[INITIAL_BATCHES];
 
+	// --- viewport --------------------------------------------------------------------------------
+	//
+	// Recorded per batch for the same reason the phase is: GL applies the viewport in force AT THE
+	// CALL, and by replay the game has moved on. Beta itself only ever sets the full window, which
+	// is a pass's default -- so the common case is the sentinel and costs no SetViewport at all.
+	// Mods are what this exists for: OldMCLogo renders its 3D logo through a viewport covering just
+	// the top strip of the title screen, and without this its perspective scene lands NDC-stretched
+	// across the whole framebuffer.
+
+	/** The full attachment -- no batch carries an explicit viewport. Impossible as a packed value. */
+	public static final long VIEWPORT_FULL = -1L;
+
+	private long[] viewport = new long[INITIAL_BATCHES];
+	private long currentViewport = VIEWPORT_FULL;
+
+	/**
+	 * The framebuffer size the frame's explicit viewports are relative to, in the same units beta
+	 * passes to {@code glViewport}. Zero until a frame records an explicit viewport; replay scales
+	 * by attachment/framebuffer, so a range drawn into a resized target keeps its proportions.
+	 */
+	private int framebufferWidth;
+	private int framebufferHeight;
+
+	/** GL's values as called: bottom-left origin. The y flip needs the attachment and happens at replay. */
+	public static long packViewport(int x, int y, int width, int height) {
+		return (x & 0xFFFFL) << 48 | (y & 0xFFFFL) << 32 | (width & 0xFFFFL) << 16
+			| height & 0xFFFFL;
+	}
+
+	public static int viewportX(long packed) {
+		return (short) (packed >>> 48);
+	}
+
+	public static int viewportY(long packed) {
+		return (short) (packed >>> 32);
+	}
+
+	public static int viewportWidth(long packed) {
+		return (short) (packed >>> 16);
+	}
+
+	public static int viewportHeight(long packed) {
+		return (short) packed;
+	}
+
+	/** Stamped onto every batch recorded from here on; {@link #VIEWPORT_FULL} for beta's default. */
+	public void viewport(long packed) {
+		currentViewport = packed;
+	}
+
+	public void framebufferSize(int width, int height) {
+		framebufferWidth = width;
+		framebufferHeight = height;
+	}
+
+	public long viewport(int batch) {
+		return viewport[batch];
+	}
+
+	public int framebufferWidth() {
+		return framebufferWidth;
+	}
+
+	public int framebufferHeight() {
+		return framebufferHeight;
+	}
+
 	// --- pass segments ---------------------------------------------------------------------------
 	//
 	// Beta clears mid-frame -- the depth buffer between the world and the GUI, most notably -- and
@@ -209,6 +276,7 @@ public final class DrawList {
 		this.glMode[batchCount] = glMode;
 		this.external[batchCount] = -1;
 		this.phase[batchCount] = phase;
+		this.viewport[batchCount] = currentViewport;
 
 		vertexCount += vertices;
 		batchCount++;
@@ -256,6 +324,7 @@ public final class DrawList {
 		this.glMode[batchCount] = glMode;
 		this.external[batchCount] = handle;
 		this.phase[batchCount] = phase;
+		this.viewport[batchCount] = currentViewport;
 		batchCount++;
 	}
 
@@ -284,6 +353,10 @@ public final class DrawList {
 		// entity draw into the last terrain one would move the deferred hook past geometry that
 		// belongs before it.
 		if (this.phase[previous] != phase) {
+			return false;
+		}
+		// And ONE viewport, for the same reason: it is replayed per batch.
+		if (this.viewport[previous] != currentViewport) {
 			return false;
 		}
 		if (this.external[previous] >= 0) {
@@ -321,6 +394,9 @@ public final class DrawList {
 		}
 		int previous = batchCount - 1;
 		if (this.phase[previous] != phase) {
+			return false;
+		}
+		if (this.viewport[previous] != currentViewport) {
 			return false;
 		}
 		if (external[previous] < 0 || buffers.get(external[previous]) != buffer) {
@@ -422,6 +498,7 @@ public final class DrawList {
 		glMode = java.util.Arrays.copyOf(glMode, capacity);
 		external = java.util.Arrays.copyOf(external, capacity);
 		phase = java.util.Arrays.copyOf(phase, capacity);
+		viewport = java.util.Arrays.copyOf(viewport, capacity);
 
 		ByteBuffer grown = direct(capacity * UNIFORM_SLOT);
 		uniforms.position(0).limit(batchCount * UNIFORM_SLOT);
@@ -527,6 +604,7 @@ public final class DrawList {
 		batchCount = 0;
 		merged = 0;
 		buffers.clear();
+		currentViewport = VIEWPORT_FULL;
 		// One segment always exists, so a batch can be recorded before any clear arrives -- a mod
 		// that draws before beta's first glClear would otherwise have nowhere to go.
 		segmentCount = 1;

@@ -129,8 +129,6 @@ public final class WebGpuFrame {
 			scaleDepth = com.periut.retrodragon.gpu.DepthBuffer.create(
 				GpuBackend.context(), scaleArena, width, height);
 			scaleBlit = ScaleBlit.create(GpuBackend.context(), scaleArena, format);
-			RetroDragon.LOGGER.info("render scale: world at {}x{} ({}x window), filter {}",
-				width, height, RenderScale.scale(), RenderScale.effectiveFilter());
 			return true;
 		} catch (RuntimeException e) {
 			RetroDragon.LOGGER.error("render scale could not be set up; rendering at window size", e);
@@ -466,9 +464,33 @@ public final class WebGpuFrame {
 			return;
 		}
 		gl.setTopology(Primitives.topology(glMode));
+		stampViewport(gl);
 		LIST.add(source, vertexCount, glMode,
 			routedKey(gl, texture, com.periut.retrodragon.api.ProgramSpec.VertexLayout.FIXED_FUNCTION),
 			texture, gl.state().writeUniforms(hasColor, hasNormals, hasTexture), phase);
+	}
+
+	/**
+	 * Records the viewport in force for the batch about to be added.
+	 *
+	 * <p>Beta's own {@code glViewport} calls are always the full window, which is what a pass
+	 * covers by default -- those collapse to the sentinel and cost nothing at replay. Only a mod's
+	 * sub-viewport (OldMCLogo's 3D title logo renders through one covering the top strip of the
+	 * screen) is carried explicitly, together with the framebuffer size it was stated against so
+	 * the replay can rescale it onto an attachment of another size.
+	 */
+	private static void stampViewport(GlShim gl) {
+		int width = gl.viewportWidth();
+		int height = gl.viewportHeight();
+		if (width <= 0 || height <= 0
+				|| gl.viewportX() == 0 && gl.viewportY() == 0
+					&& width == renderer.width() && height == renderer.height()) {
+			LIST.viewport(com.periut.retrodragon.shim.DrawList.VIEWPORT_FULL);
+			return;
+		}
+		LIST.framebufferSize(renderer.width(), renderer.height());
+		LIST.viewport(com.periut.retrodragon.shim.DrawList.packViewport(gl.viewportX(),
+			gl.viewportY(), width, height));
 	}
 
 	/**
@@ -581,6 +603,7 @@ public final class WebGpuFrame {
 		long outlineKey = routedKey(gl, outlineTexture,
 			com.periut.retrodragon.api.ProgramSpec.VertexLayout.FIXED_FUNCTION,
 			gl.pipelineKeyWithDepthBias(OUTLINE_DEPTH_BIAS, OUTLINE_DEPTH_SLOPE));
+		stampViewport(gl);
 		LIST.add(LINE_EXPANDER.data(), LINE_EXPANDER.vertexCount(), Primitives.GL_QUADS,
 			outlineKey,
 			outlineTexture,
@@ -614,6 +637,7 @@ public final class WebGpuFrame {
 		}
 		GlShim gl = ShimTracker.shim();
 		gl.setTopology(Primitives.topology(Primitives.GL_QUADS));
+		stampViewport(gl);
 		LIST.add(source, vertexCount, Primitives.GL_QUADS, gl.pipelineKey(), texture,
 			gl.state().writeUniforms(true, false), com.periut.retrodragon.api.ShaderApi.phase());
 	}
@@ -643,6 +667,7 @@ public final class WebGpuFrame {
 		int texture = gl.boundTexture();
 		terrainBatches++;
 		terrainVertices += vertexCount;
+		stampViewport(gl);
 		LIST.addExternal(buffer, firstVertex, vertexCount, glMode,
 			routedKey(gl, texture, com.periut.retrodragon.api.ProgramSpec.VertexLayout.TERRAIN),
 			texture, gl.state().writeUniforms(true, false),
@@ -773,9 +798,11 @@ public final class WebGpuFrame {
 		// Render scale, on the ordinary path: the world range goes into a target of its own size and
 		// is resampled onto the swapchain before the GUI range is drawn over it at full resolution.
 		//
-		// No viewport work is needed here, unlike the GL backend. This renderer never calls
-		// SetViewport at all -- a pass covers its whole attachment, so NDC lands on whatever size the
-		// target is, and a uniform scale leaves the projection's aspect untouched.
+		// No viewport work is needed for the scale itself, unlike the GL backend: a pass covers its
+		// whole attachment by default, so NDC lands on whatever size the target is, and a uniform
+		// scale leaves the projection's aspect untouched. Per-batch viewports exist only for batches
+		// a mod captured under an explicit sub-viewport, and those are rescaled by
+		// attachment/framebuffer -- which is why every range below states its attachment's size.
 		//
 		// Deliberately NOT combined with a shader extension's world redirect (handled below). There
 		// the extension owns the world target and its composite writes the swapchain, so scaling would
@@ -787,12 +814,12 @@ public final class WebGpuFrame {
 			int sh = scaleTarget.height();
 
 			immediate.render(renderer.frame(), scaleTarget.view(), NO_AUX, scaleDepth.view(),
-				LIST, 0, worldEnd, pipelines, textures, MemorySegment.NULL);
+				sw, sh, LIST, 0, worldEnd, pipelines, textures, MemorySegment.NULL);
 			scaleBlit.draw(renderer.frame(), renderer.colorView(), scaleTarget.view(),
 				sw, sh, renderer.width(), renderer.height(), filter);
 			return immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
-				renderer.depthView(), LIST, worldEnd, LIST.batchCount(), pipelines, textures,
-				MemorySegment.NULL);
+				renderer.depthView(), renderer.width(), renderer.height(), LIST, worldEnd,
+				LIST.batchCount(), pipelines, textures, MemorySegment.NULL);
 		}
 
 		// No extension, or NO WORLD THIS FRAME: one upload, one range, straight to the swapchain --
@@ -807,8 +834,8 @@ public final class WebGpuFrame {
 		// removes all of it, and removes any chance of a menu frame reaching the screen half-written.
 		if (extensions.length == 0 || worldEnd == 0) {
 			return immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
-				renderer.depthView(), LIST, 0, LIST.batchCount(), pipelines, textures,
-				MemorySegment.NULL);
+				renderer.depthView(), renderer.width(), renderer.height(), LIST, 0,
+				LIST.batchCount(), pipelines, textures, MemorySegment.NULL);
 		}
 
 		MemorySegment shaderGroup = shaderResources == null
@@ -816,6 +843,8 @@ public final class WebGpuFrame {
 		MemorySegment worldView = redirected ? shaderTargets.view() : renderer.colorView();
 		MemorySegment[] worldAux = redirected ? shaderTargets.auxViews() : NO_AUX;
 		FixedFunctionPipelines worldCache = redirected ? worldPipelines : pipelines;
+		int worldWidth = redirected ? shaderTargets.width() : renderer.width();
+		int worldHeight = redirected ? shaderTargets.height() : renderer.height();
 		// Where the frame was cut, and by what. A world that never ends means the GUI is being drawn
 		// into the shader extension's linear target and re-gamma'd by its composite, which looks like
 		// a gamma bug everywhere at once -- washed-out text, a too-bright menu -- rather than like a
@@ -843,16 +872,18 @@ public final class WebGpuFrame {
 			&& com.periut.retrodragon.api.ShaderApi.worldColorClearClaimed();
 
 		int draws = immediate.render(renderer.frame(), worldView, worldAux, renderer.depthView(),
-			LIST, 0, deferredAt, worldCache, textures, shaderGroup, ownClear);
+			worldWidth, worldHeight, LIST, 0, deferredAt, worldCache, textures, shaderGroup,
+			ownClear);
 		hook(extensions, context, HOOK_DEFERRED);
 		draws = immediate.render(renderer.frame(), worldView, worldAux, renderer.depthView(),
-			LIST, deferredAt, worldEnd, worldCache, textures, shaderGroup, ownClear);
+			worldWidth, worldHeight, LIST, deferredAt, worldEnd, worldCache, textures, shaderGroup,
+			ownClear);
 		hook(extensions, context, HOOK_COMPOSITE);
 		// The GUI always goes to the swapchain, whether or not the world was redirected: it is drawn
 		// in display space over an image the composite chain has already tonemapped.
 		draws = immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
-			renderer.depthView(), LIST, worldEnd, LIST.batchCount(), pipelines, textures,
-			shaderGroup);
+			renderer.depthView(), renderer.width(), renderer.height(), LIST, worldEnd,
+			LIST.batchCount(), pipelines, textures, shaderGroup);
 		hook(extensions, context, HOOK_FRAME_END);
 		// Frees bind groups replaced several frames ago; see ShaderResources.endFrame.
 		if (shaderResources != null) {

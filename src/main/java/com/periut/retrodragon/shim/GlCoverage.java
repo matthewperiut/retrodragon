@@ -68,6 +68,15 @@ public final class GlCoverage {
 			"flat vs smooth is a WGSL @interpolate decision, not pipeline state; always smooth");
 	}
 
+	/**
+	 * The entry points {@code GlPlugin}'s runtime tripwire must stay silent about: every one is a
+	 * claim, written above, that doing nothing is correct -- so a warning would send someone
+	 * hunting a bug that is not there.
+	 */
+	public static Set<String> excusedNames() {
+		return EXCUSED.keySet();
+	}
+
 	public static void main(String[] args) throws Exception {
 		Set<String> implemented = new TreeSet<>();
 		for (Method m : GlBridge.class.getDeclaredMethods()) {

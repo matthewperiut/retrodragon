@@ -369,6 +369,35 @@ public final class GlState {
 		fogColor[3] = a;
 	}
 
+	// --- attrib snapshots ---------------------------------------------------------------------
+	//
+	// Read by GlShim's glPushAttrib. The shim mirrors most pipeline state itself; these are the
+	// pieces that live only here.
+
+	boolean fogEnabled() {
+		return fogEnabled;
+	}
+
+	boolean alphaTestEnabled() {
+		return alphaTestEnabled;
+	}
+
+	float alphaRef() {
+		return alphaRef;
+	}
+
+	int matrixMode() {
+		return matrixMode;
+	}
+
+	void getColor(float[] out) {
+		System.arraycopy(color, 0, out, 0, 4);
+	}
+
+	void getFogColor(float[] out) {
+		System.arraycopy(fogColor, 0, out, 0, 4);
+	}
+
 	// --- output -------------------------------------------------------------------------------
 
 	/**

@@ -100,8 +100,10 @@ public final class ImmediateRenderer implements AutoCloseable {
 	public int render(Frame frame, MemorySegment colorView, MemorySegment depthView,
 			DrawList list, FixedFunctionPipelines pipelines, TextureStore textures) {
 		upload(list);
-		return render(frame, colorView, NO_AUX, depthView, list, 0, list.batchCount(), pipelines,
-			textures, MemorySegment.NULL);
+		// Attachment size 0: the caller (tests and benches) has no window, and a size of zero
+		// disables per-batch viewports rather than scaling by garbage.
+		return render(frame, colorView, NO_AUX, depthView, 0, 0, list, 0, list.batchCount(),
+			pipelines, textures, MemorySegment.NULL);
 	}
 
 	private static final MemorySegment[] NO_AUX = new MemorySegment[0];
@@ -152,6 +154,9 @@ public final class ImmediateRenderer implements AutoCloseable {
 	 * mid-frame {@code glClear} calls work: a WebGPU clear is a pass load op, so "clear the depth
 	 * buffer now" can only mean "end this pass and start another".
 	 *
+	 * @param attachWidth  the colour attachment's size, for batches captured under an explicit
+	 *                     {@code glViewport}; 0 disables per-batch viewports for callers with no
+	 *                     meaningful window (tests, benches)
 	 * @param rangeFirst first batch to draw, inclusive
 	 * @param rangeEnd   last batch, exclusive. Segments are clipped to the range, so a clear that
 	 *                   falls inside it still starts a new pass and one outside it is skipped.
@@ -159,10 +164,11 @@ public final class ImmediateRenderer implements AutoCloseable {
 	 * @return the number of draw calls issued, cumulative across ranges since {@link #upload}
 	 */
 	public int render(Frame frame, MemorySegment colorView, MemorySegment[] aux,
-			MemorySegment depthView, DrawList list, int rangeFirst, int rangeEnd,
-			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup) {
-		return render(frame, colorView, aux, depthView, list, rangeFirst, rangeEnd, pipelines,
-			textures, shaderGroup, false);
+			MemorySegment depthView, int attachWidth, int attachHeight, DrawList list,
+			int rangeFirst, int rangeEnd, FixedFunctionPipelines pipelines, TextureStore textures,
+			MemorySegment shaderGroup) {
+		return render(frame, colorView, aux, depthView, attachWidth, attachHeight, list, rangeFirst,
+			rangeEnd, pipelines, textures, shaderGroup, false);
 	}
 
 	/**
@@ -171,9 +177,9 @@ public final class ImmediateRenderer implements AutoCloseable {
 	 *                           The DEPTH clear is unaffected: the world needs it either way.
 	 */
 	public int render(Frame frame, MemorySegment colorView, MemorySegment[] aux,
-			MemorySegment depthView, DrawList list, int rangeFirst, int rangeEnd,
-			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup,
-			boolean suppressColorClear) {
+			MemorySegment depthView, int attachWidth, int attachHeight, DrawList list,
+			int rangeFirst, int rangeEnd, FixedFunctionPipelines pipelines, TextureStore textures,
+			MemorySegment shaderGroup, boolean suppressColorClear) {
 		try (Arena frameArena = Arena.ofConfined()) {
 			for (int segment = 0; segment < list.segmentCount(); segment++) {
 				int segmentFirst = list.segmentFirstBatch(segment);
@@ -199,8 +205,8 @@ public final class ImmediateRenderer implements AutoCloseable {
 					list.segmentClear(segment, 0), list.segmentClear(segment, 1),
 					list.segmentClear(segment, 2), list.segmentClear(segment, 3),
 					depthView, clearsDepth);
-				drawSegment(pass, frameArena, list, first, Math.max(first, end), pipelines, textures,
-					shaderGroup);
+				drawSegment(pass, frameArena, list, first, Math.max(first, end), attachWidth,
+					attachHeight, pipelines, textures, shaderGroup);
 				frame.endPass();
 			}
 		}
@@ -213,10 +219,13 @@ public final class ImmediateRenderer implements AutoCloseable {
 	}
 
 	private void drawSegment(MemorySegment pass, Arena frameArena, DrawList list, int first, int end,
-			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup) {
+			int attachWidth, int attachHeight, FixedFunctionPipelines pipelines,
+			TextureStore textures, MemorySegment shaderGroup) {
 		if (first == end) {
 			return;
 		}
+		// A fresh pass always starts at the full attachment; only a change costs a SetViewport.
+		long currentViewport = DrawList.VIEWPORT_FULL;
 		boolean hasShaderGroup = !shaderGroup.equals(MemorySegment.NULL);
 		// Whether group 1 is currently bound AND still compatible with the pipeline in force.
 		// Setting a pipeline whose layout does not include group 1 unbinds it, per WebGPU's
@@ -240,6 +249,19 @@ public final class ImmediateRenderer implements AutoCloseable {
 					|| list.phase(batch) == com.periut.retrodragon.api.DrawPhase.CASTER_ONLY) {
 				continue;
 			}
+			// The viewport the batch was captured under, honoured per batch the way GL does. Skipped
+			// entirely when the caller has no attachment size to scale against.
+			if (attachWidth > 0) {
+				long batchViewport = list.viewport(batch);
+				if (batchViewport != currentViewport) {
+					if (!applyViewport(pass, batchViewport, list, attachWidth, attachHeight)) {
+						// Clamped to nothing: GL draws nothing through an empty viewport either.
+						continue;
+					}
+					currentViewport = batchViewport;
+				}
+			}
+
 			int glMode = list.glMode(batch);
 			long key = list.pipelineKey(batch);
 
@@ -331,6 +353,56 @@ public final class ImmediateRenderer implements AutoCloseable {
 			}
 			drawsLastFrame++;
 		}
+	}
+
+	/**
+	 * Applies a batch's viewport to the pass, converting from GL's convention to WebGPU's.
+	 *
+	 * <p>Three conversions meet here, which is why the raw GL values are carried all the way to the
+	 * point the attachment is known rather than converted at capture:
+	 *
+	 * <ul>
+	 *   <li><b>Origin flip.</b> GL's viewport y is from the BOTTOM of the framebuffer, WebGPU's
+	 *       from the top: {@code y' = fbHeight - y - height}.</li>
+	 *   <li><b>Scale.</b> The values are in framebuffer units (what beta told {@code glViewport}),
+	 *       but the range may replay into an attachment of another size -- the render-scale world
+	 *       target -- so both axes scale by attachment/framebuffer.</li>
+	 *   <li><b>Clamp.</b> GL accepts a viewport hanging off the framebuffer; Dawn fails validation
+	 *       for one, and a failed pass takes the whole frame with it. Clamped empty means "draw
+	 *       nothing", exactly as GL would through a zero-area viewport.</li>
+	 * </ul>
+	 *
+	 * @return false when the viewport clamps to nothing and the batch must be skipped
+	 */
+	private static boolean applyViewport(MemorySegment pass, long viewport, DrawList list,
+			int attachWidth, int attachHeight) {
+		if (viewport == DrawList.VIEWPORT_FULL) {
+			wgpuRenderPassEncoderSetViewport(pass, 0.0F, 0.0F, attachWidth, attachHeight, 0.0F, 1.0F);
+			return true;
+		}
+		int fbWidth = list.framebufferWidth();
+		int fbHeight = list.framebufferHeight();
+		if (fbWidth <= 0 || fbHeight <= 0) {
+			// No framebuffer size on record to scale by; the full attachment is the honest fallback.
+			wgpuRenderPassEncoderSetViewport(pass, 0.0F, 0.0F, attachWidth, attachHeight, 0.0F, 1.0F);
+			return true;
+		}
+		float scaleX = attachWidth / (float) fbWidth;
+		float scaleY = attachHeight / (float) fbHeight;
+		float x0 = DrawList.viewportX(viewport) * scaleX;
+		float y0 = (fbHeight - DrawList.viewportY(viewport) - DrawList.viewportHeight(viewport))
+			* scaleY;
+		float x1 = x0 + DrawList.viewportWidth(viewport) * scaleX;
+		float y1 = y0 + DrawList.viewportHeight(viewport) * scaleY;
+		x0 = Math.max(0.0F, x0);
+		y0 = Math.max(0.0F, y0);
+		x1 = Math.min(attachWidth, x1);
+		y1 = Math.min(attachHeight, y1);
+		if (x1 - x0 < 1.0F || y1 - y0 < 1.0F) {
+			return false;
+		}
+		wgpuRenderPassEncoderSetViewport(pass, x0, y0, x1 - x0, y1 - y0, 0.0F, 1.0F);
+		return true;
 	}
 
 	/**
