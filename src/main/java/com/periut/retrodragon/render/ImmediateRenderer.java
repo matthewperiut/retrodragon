@@ -171,15 +171,29 @@ public final class ImmediateRenderer implements AutoCloseable {
 			rangeEnd, pipelines, textures, shaderGroup, false);
 	}
 
+	public int render(Frame frame, MemorySegment colorView, MemorySegment[] aux,
+			MemorySegment depthView, int attachWidth, int attachHeight, DrawList list,
+			int rangeFirst, int rangeEnd, FixedFunctionPipelines pipelines, TextureStore textures,
+			MemorySegment shaderGroup, boolean suppressColorClear) {
+		return render(frame, colorView, aux, depthView, MemorySegment.NULL, 0, attachWidth,
+			attachHeight, list, rangeFirst, rangeEnd, pipelines, textures, shaderGroup,
+			suppressColorClear);
+	}
+
 	/**
+	 * @param colorTexture the colour attachment's texture, which {@code glCopyTexSubImage2D} reads
+	 *                     from; {@link MemorySegment#NULL} for a caller that cannot supply one, and
+	 *                     the frame's copies are then skipped rather than read from the wrong target
+	 * @param colorFormat  its format, which the copy's staging texture has to match
 	 * @param suppressColorClear true when a shader extension has already painted every pixel -- see
 	 *                           {@link com.periut.retrodragon.api.ShaderApi#claimWorldColorClear}.
 	 *                           The DEPTH clear is unaffected: the world needs it either way.
 	 */
 	public int render(Frame frame, MemorySegment colorView, MemorySegment[] aux,
-			MemorySegment depthView, int attachWidth, int attachHeight, DrawList list,
-			int rangeFirst, int rangeEnd, FixedFunctionPipelines pipelines, TextureStore textures,
-			MemorySegment shaderGroup, boolean suppressColorClear) {
+			MemorySegment depthView, MemorySegment colorTexture, int colorFormat, int attachWidth,
+			int attachHeight, DrawList list, int rangeFirst, int rangeEnd,
+			FixedFunctionPipelines pipelines, TextureStore textures, MemorySegment shaderGroup,
+			boolean suppressColorClear) {
 		try (Arena frameArena = Arena.ofConfined()) {
 			for (int segment = 0; segment < list.segmentCount(); segment++) {
 				int segmentFirst = list.segmentFirstBatch(segment);
@@ -188,6 +202,14 @@ public final class ImmediateRenderer implements AutoCloseable {
 				// the segment overlaps would clear the world target again halfway through the frame.
 				boolean ownsClear = segmentFirst >= rangeFirst && segmentFirst < rangeEnd
 					|| segmentFirst < rangeFirst && segment == 0 && rangeFirst == 0;
+				// The segment's copies belong to the same range its clear does, and run BEFORE its
+				// pass -- which is what puts them after everything recorded ahead of them and before
+				// everything recorded behind. Done ahead of the two skips below, because a copy is
+				// work even when the segment it is attached to draws nothing at all.
+				if (ownsClear && list.segmentCopyCount(segment) > 0) {
+					copySegment(frame, list, segment, colorTexture, colorFormat, attachWidth,
+						attachHeight, textures);
+				}
 				int first = Math.max(segmentFirst, rangeFirst);
 				int end = Math.min(segmentEnd, rangeEnd);
 				if (first >= end && !ownsClear) {
@@ -217,6 +239,47 @@ public final class ImmediateRenderer implements AutoCloseable {
 		}
 		return drawsLastFrame;
 	}
+
+	/**
+	 * Runs the framebuffer copies attached to a segment; see {@link FramebufferCopy}.
+	 *
+	 * <p>Nothing in beta reaches this -- it is a mod's path, and one mod at a time: UniTweaks' title
+	 * screen panorama copies the screen into a texture eight times a frame to blur it. So the machine
+	 * is built on first use and never at all in a plain run.
+	 */
+	private void copySegment(Frame frame, DrawList list, int segment, MemorySegment colorTexture,
+			int colorFormat, int attachWidth, int attachHeight, TextureStore textures) {
+		if (colorTexture.equals(MemorySegment.NULL) || attachWidth <= 0 || attachHeight <= 0) {
+			// No attachment to read, which is a range drawn into a target this renderer does not own
+			// (a shader extension's) or a caller with no window at all. Warned once rather than
+			// silently dropped: a missing copy is a texture frozen at whatever it last held.
+			if (copyWarned) {
+				return;
+			}
+			copyWarned = true;
+			com.periut.retrodragon.RetroDragon.LOGGER.warn("glCopyTexSubImage2D reached a range whose"
+				+ " colour attachment cannot be read back; the copy is skipped");
+			return;
+		}
+		if (copier == null) {
+			copier = new FramebufferCopy(ctx);
+		}
+		// The attachment's size stands in for the framebuffer the game stated its rectangle against.
+		// They are the same thing for every range that draws to the swapchain, which is where a copy
+		// has ever come from -- a GUI screen. A world range under render scale draws into a smaller
+		// target, and a copy there would read that target's pixels rather than the window's.
+		int first = list.segmentCopyFirst(segment);
+		for (int copy = first; copy < first + list.segmentCopyCount(segment); copy++) {
+			GpuTexture destination = textures.get(list.copyTexture(copy));
+			copier.copy(frame, colorTexture, colorFormat, attachWidth, attachHeight, destination,
+				list.copyDstX(copy), list.copyDstY(copy), list.copySrcX(copy), list.copySrcY(copy),
+				list.copyWidth(copy), list.copyHeight(copy));
+		}
+	}
+
+	/** Built on the first {@code glCopyTexSubImage2D} of the run; null in a game that makes none. */
+	private FramebufferCopy copier;
+	private boolean copyWarned;
 
 	private void drawSegment(MemorySegment pass, Arena frameArena, DrawList list, int first, int end,
 			int attachWidth, int attachHeight, FixedFunctionPipelines pipelines,
@@ -639,6 +702,10 @@ public final class ImmediateRenderer implements AutoCloseable {
 
 	@Override
 	public void close() {
+		if (copier != null) {
+			copier.close();
+			copier = null;
+		}
 		invalidateBindGroups();
 		for (MemorySegment sampler : samplers.values()) {
 			wgpuSamplerRelease(sampler);

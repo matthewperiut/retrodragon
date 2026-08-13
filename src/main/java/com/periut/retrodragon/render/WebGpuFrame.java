@@ -425,6 +425,43 @@ public final class WebGpuFrame {
 	}
 
 	/**
+	 * Records a {@code glCopyTexSubImage2D} into this frame, in GL's own coordinates.
+	 *
+	 * <p>Recorded rather than performed, exactly as a draw is: what the call means is "everything
+	 * drawn so far, and nothing after it", and at the moment of the call none of it has been
+	 * submitted. See {@link FramebufferCopy} for how the copy itself is done and why it is a draw.
+	 *
+	 * <p>The destination is rebuilt as a renderable texture here rather than at replay, because that
+	 * reallocates and uploads -- neither of which belongs inside a frame that is being recorded.
+	 *
+	 * @param name the bound texture; a name with no storage is dropped, which is what GL does with
+	 *             a copy into a texture that was never defined
+	 */
+	public static void copyTexSubImage(int name, int dstX, int dstY, int srcX, int srcY, int width,
+			int height) {
+		if (!active() || width <= 0 || height <= 0) {
+			return;
+		}
+		if (com.periut.retrodragon.shim.DisplayLists.isRecording()) {
+			// GL_COMPILE. A display list records geometry here, not framebuffer state, and beta never
+			// builds one containing a copy.
+			return;
+		}
+		if (!textures.has(name)) {
+			return;
+		}
+		if (!textures.get(name).renderable()) {
+			// Once per texture, not once per copy: the panorama makes eight of these a frame.
+			if (textures.makeRenderable(name) == null) {
+				return;
+			}
+			// The rebuild replaced the texture, so the cached bind group holds a view of the old one.
+			immediate.invalidate(name);
+		}
+		LIST.copyToTexture(name, dstX, dstY, srcX, srcY, width, height);
+	}
+
+	/**
 	 * Records one Tessellator batch.
 	 *
 	 * @param source      beta's packed vertex bytes, not consumed
@@ -814,12 +851,14 @@ public final class WebGpuFrame {
 			int sh = scaleTarget.height();
 
 			immediate.render(renderer.frame(), scaleTarget.view(), NO_AUX, scaleDepth.view(),
-				sw, sh, LIST, 0, worldEnd, pipelines, textures, MemorySegment.NULL);
+				scaleTarget.handle(), scaleTarget.format(), sw, sh, LIST, 0, worldEnd, pipelines,
+				textures, MemorySegment.NULL, false);
 			scaleBlit.draw(renderer.frame(), renderer.colorView(), scaleTarget.view(),
 				sw, sh, renderer.width(), renderer.height(), filter);
 			return immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
-				renderer.depthView(), renderer.width(), renderer.height(), LIST, worldEnd,
-				LIST.batchCount(), pipelines, textures, MemorySegment.NULL);
+				renderer.depthView(), renderer.colorTexture(), renderer.surfaceFormat(),
+				renderer.width(), renderer.height(), LIST, worldEnd, LIST.batchCount(), pipelines,
+				textures, MemorySegment.NULL, false);
 		}
 
 		// No extension, or NO WORLD THIS FRAME: one upload, one range, straight to the swapchain --
@@ -834,8 +873,9 @@ public final class WebGpuFrame {
 		// removes all of it, and removes any chance of a menu frame reaching the screen half-written.
 		if (extensions.length == 0 || worldEnd == 0) {
 			return immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
-				renderer.depthView(), renderer.width(), renderer.height(), LIST, 0,
-				LIST.batchCount(), pipelines, textures, MemorySegment.NULL);
+				renderer.depthView(), renderer.colorTexture(), renderer.surfaceFormat(),
+				renderer.width(), renderer.height(), LIST, 0, LIST.batchCount(), pipelines, textures,
+				MemorySegment.NULL, false);
 		}
 
 		MemorySegment shaderGroup = shaderResources == null
@@ -871,19 +911,24 @@ public final class WebGpuFrame {
 		boolean ownClear = worldEnd > 0
 			&& com.periut.retrodragon.api.ShaderApi.worldColorClearClaimed();
 
+		MemorySegment worldTexture = redirected
+			? shaderTargets.texture(0) : renderer.colorTexture();
+		int worldFormat = redirected ? shaderTargets.format() : renderer.surfaceFormat();
+
 		int draws = immediate.render(renderer.frame(), worldView, worldAux, renderer.depthView(),
-			worldWidth, worldHeight, LIST, 0, deferredAt, worldCache, textures, shaderGroup,
-			ownClear);
+			worldTexture, worldFormat, worldWidth, worldHeight, LIST, 0, deferredAt, worldCache,
+			textures, shaderGroup, ownClear);
 		hook(extensions, context, HOOK_DEFERRED);
 		draws = immediate.render(renderer.frame(), worldView, worldAux, renderer.depthView(),
-			worldWidth, worldHeight, LIST, deferredAt, worldEnd, worldCache, textures, shaderGroup,
-			ownClear);
+			worldTexture, worldFormat, worldWidth, worldHeight, LIST, deferredAt, worldEnd,
+			worldCache, textures, shaderGroup, ownClear);
 		hook(extensions, context, HOOK_COMPOSITE);
 		// The GUI always goes to the swapchain, whether or not the world was redirected: it is drawn
 		// in display space over an image the composite chain has already tonemapped.
 		draws = immediate.render(renderer.frame(), renderer.colorView(), NO_AUX,
-			renderer.depthView(), renderer.width(), renderer.height(), LIST, worldEnd,
-			LIST.batchCount(), pipelines, textures, shaderGroup);
+			renderer.depthView(), renderer.colorTexture(), renderer.surfaceFormat(),
+			renderer.width(), renderer.height(), LIST, worldEnd, LIST.batchCount(), pipelines,
+			textures, shaderGroup, false);
 		hook(extensions, context, HOOK_FRAME_END);
 		// Frees bind groups replaced several frames ago; see ShaderResources.endFrame.
 		if (shaderResources != null) {

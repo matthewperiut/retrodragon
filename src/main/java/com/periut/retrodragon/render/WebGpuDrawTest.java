@@ -60,6 +60,7 @@ public final class WebGpuDrawTest {
 				failures += wideLine(ctx, arena, target, depth, pipelines, 1.0F, 2);
 				failures += wideLine(ctx, arena, target, depth, pipelines, 2.0F, 4);
 				failures += terrainLayouts(ctx, target, depth);
+				failures += framebufferCopy(ctx);
 			}
 		}
 
@@ -1301,6 +1302,99 @@ public final class WebGpuDrawTest {
 			out.putInt(base + 28, 0);
 		}
 		out.position(base + TerrainVertex.stride(compact));
+	}
+
+	/**
+	 * {@code glCopyTexSubImage2D}: the framebuffer into a texture, the right way up and in the right
+	 * place. See {@link FramebufferCopy}.
+	 *
+	 * <p>The orientation is the whole point of the check. GL's window origin is bottom-left and a
+	 * texture's first row is its top, so a copy that preserves row order produces an upside-down
+	 * image -- which raises no validation error and is invisible in any log. The source here is
+	 * deliberately asymmetric top-to-bottom, so an unflipped copy fails rather than passing by
+	 * symmetry.
+	 */
+	private static int framebufferCopy(WebGPUContext ctx) {
+		int failures = 0;
+		final int size = 8;
+
+		// Rows 0..3 blue (the TOP of the framebuffer), rows 4..7 red (the bottom, which GL calls
+		// y = 0 and which therefore has to arrive as the destination's FIRST rows).
+		ByteBuffer source = ByteBuffer.allocateDirect(size * size * 4)
+			.order(java.nio.ByteOrder.nativeOrder());
+		for (int y = 0; y < size; y++) {
+			for (int x = 0; x < size; x++) {
+				if (y < size / 2) {
+					putRgba(source, 0, 0, 255, 255);
+				} else {
+					putRgba(source, 255, 0, 0, 255);
+				}
+			}
+		}
+		source.flip();
+
+		// The destination starts entirely green, so anything the copy does NOT touch is identifiable.
+		ByteBuffer green = ByteBuffer.allocateDirect(size * size * 4)
+			.order(java.nio.ByteOrder.nativeOrder());
+		for (int i = 0; i < size * size; i++) {
+			putRgba(green, 0, 255, 0, 255);
+		}
+		green.flip();
+
+		try (TextureStore store = new TextureStore(ctx);
+				GpuTexture framebuffer = GpuTexture.create(ctx, size, size, 1, "test-framebuffer");
+				FramebufferCopy copier = new FramebufferCopy(ctx)) {
+			framebuffer.upload(0, 0, 0, size, size, source);
+
+			int name = store.gen();
+			store.define(name, size, size, green);
+			// The store's textures are not renderable until something copies into them; this is the
+			// rebuild that makes one, and it must carry the image across.
+			GpuTexture destination = store.makeRenderable(name);
+			failures += check(destination != null && destination.renderable(),
+				"makeRenderable produced a renderable texture");
+			if (destination == null) {
+				return failures + 1;
+			}
+			byte[] preserved = Readback.rgba(ctx, destination.handle(), size, size);
+			failures += check(Readback.pixel(preserved, size, 0, 0) == 0xFF00FF00,
+				"makeRenderable kept the image the texture already held, got "
+					+ hex(Readback.pixel(preserved, size, 0, 0)));
+
+			// A SUB-image copy: the bottom-left 4x4 of the framebuffer -- all red -- into the
+			// destination at (2,2). Everything outside that rectangle must still be green.
+			try (Frame frame = Frame.begin(ctx)) {
+				copier.copy(frame, framebuffer.handle(), WGPUTextureFormat_RGBA8Unorm(), size, size,
+					destination, 2, 2, 0, 0, 4, 4);
+			}
+			byte[] pixels = Readback.rgba(ctx, destination.handle(), size, size);
+			failures += check(Readback.pixel(pixels, size, 3, 3) == 0xFFFF0000,
+				"the copied rectangle landed at its destination offset, got "
+					+ hex(Readback.pixel(pixels, size, 3, 3)));
+			failures += check(Readback.pixel(pixels, size, 0, 0) == 0xFF00FF00,
+				"outside the rectangle the texture was left alone, got "
+					+ hex(Readback.pixel(pixels, size, 0, 0)));
+			failures += check(Readback.pixel(pixels, size, 6, 6) == 0xFF00FF00,
+				"the oversized triangle did not spill past the rectangle, got "
+					+ hex(Readback.pixel(pixels, size, 6, 6)));
+
+			// The whole framebuffer, over the whole texture: row 0 must be the framebuffer's BOTTOM.
+			try (Frame frame = Frame.begin(ctx)) {
+				copier.copy(frame, framebuffer.handle(), WGPUTextureFormat_RGBA8Unorm(), size, size,
+					destination, 0, 0, 0, 0, size, size);
+			}
+			pixels = Readback.rgba(ctx, destination.handle(), size, size);
+			failures += check(Readback.pixel(pixels, size, 0, 0) == 0xFFFF0000,
+				"the first destination row is the framebuffer's bottom row, got "
+					+ hex(Readback.pixel(pixels, size, 0, 0)));
+			failures += check(Readback.pixel(pixels, size, 0, size - 1) == 0xFF0000FF,
+				"the last destination row is the framebuffer's top row, got "
+					+ hex(Readback.pixel(pixels, size, 0, size - 1)));
+
+			store.delete(name);
+		}
+		System.out.println("framebuffer copy = " + (failures == 0 ? "ok" : "FAILED"));
+		return failures;
 	}
 
 	private static void putRgba(ByteBuffer buffer, int r, int g, int b, int a) {

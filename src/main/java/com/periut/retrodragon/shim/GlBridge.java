@@ -433,6 +433,28 @@ public final class GlBridge {
 		}
 	}
 
+	/**
+	 * The framebuffer, into the bound texture. Not a mod-only curiosity: it is how anything on this
+	 * game builds a full-screen effect without a framebuffer object.
+	 *
+	 * <p>UniTweaks' title-screen panorama is what this was written for, and it is worth spelling out
+	 * why it needs it rather than an FBO: the sky cube is rendered into a 256-square corner of the
+	 * screen, copied out to a texture, and drawn back over itself eight times to blur it. Without
+	 * this call the texture stays as the game allocated it -- empty -- so the panorama draws eight
+	 * passes of nothing and the title screen comes out black.
+	 *
+	 * <p>Level 0 only. GL allows a copy into any level and nothing does it; a copy into a mip level
+	 * would need a second attachment view per level, for an image that no mip chain here is built
+	 * from.
+	 */
+	public static void glCopyTexSubImage2D(int target, int level, int xoffset, int yoffset,
+			int x, int y, int width, int height) {
+		if (target != GL_TEXTURE_2D || level != 0) {
+			return;
+		}
+		WebGpuFrame.copyTexSubImage(shim().boundTexture(), xoffset, yoffset, x, y, width, height);
+	}
+
 	// --- texture queries ----------------------------------------------------------------------------
 	//
 	// Both of these used to return 0, which is not a neutral answer: it is "this device cannot do

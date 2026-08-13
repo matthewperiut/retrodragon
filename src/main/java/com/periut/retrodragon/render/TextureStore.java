@@ -220,6 +220,43 @@ public final class TextureStore implements AutoCloseable {
 		return BlockAtlas.canMipmap(width, height) ? BlockAtlas.mipLevels() + 1 : 1;
 	}
 
+	/**
+	 * Rebuilds a texture so a pass can draw into it, for {@code glCopyTexSubImage2D}.
+	 *
+	 * <p>A rebuild rather than a flag, because WebGPU usage is fixed at creation and nothing knows in
+	 * advance which of the game's textures a mod will copy the framebuffer into. UniTweaks' panorama
+	 * is the case this exists for: it allocates an ordinary 256-square texture through the game's own
+	 * texture manager and only then starts copying the screen into it, eight times a frame.
+	 *
+	 * <p>The old image is carried across rather than dropped. A copy usually rewrites the whole
+	 * texture and would not miss it, but {@code glCopyTexSubImage2D} is a SUB-image call and is
+	 * entitled to touch a corner of a texture the game drew the rest of.
+	 *
+	 * @return the renderable texture, or null when the name has no storage -- copying into a texture
+	 *     that was never defined is a GL error, not something to invent an image for
+	 */
+	public synchronized GpuTexture makeRenderable(int name) {
+		GpuTexture existing = textures.get(name);
+		if (existing == null) {
+			return null;
+		}
+		if (existing.renderable()) {
+			return existing;
+		}
+		GpuTexture rebuilt = GpuTexture.create(ctx, existing.width(), existing.height(),
+			existing.mipLevels(), "gl-texture-" + name, true);
+		// Level 0 only: it is the level a copy can reach, and the levels under it are about to be
+		// stale whatever happens -- GL would not regenerate them either without glGenerateMipmap.
+		com.periut.retrodragon.gpu.Blit.copy(ctx, existing.handle(), rebuilt.handle(),
+			existing.width(), existing.height());
+		textures.put(name, rebuilt);
+		// Released immediately after a submit that reads it, which is safe: a submitted command buffer
+		// holds its own reference to every resource it names, so the copy still has the old texture
+		// however soon the GPU gets to it.
+		existing.close();
+		return rebuilt;
+	}
+
 	public synchronized void delete(int name) {
 		linear.remove(name);
 		clamp.remove(name);

@@ -31,26 +31,47 @@ public final class GpuTexture implements AutoCloseable {
 	private final WebGPUContext ctx;
 	private final MemorySegment texture;
 	private final MemorySegment view;
+	/** A level-0-only view, for a texture that can be drawn into; NULL for an ordinary one. */
+	private final MemorySegment attachmentView;
 	private final int width;
 	private final int height;
 	private final int mipLevels;
 
 	private GpuTexture(WebGPUContext ctx, MemorySegment texture, MemorySegment view,
-			int width, int height, int mipLevels) {
+			MemorySegment attachmentView, int width, int height, int mipLevels) {
 		this.ctx = ctx;
 		this.texture = texture;
 		this.view = view;
+		this.attachmentView = attachmentView;
 		this.width = width;
 		this.height = height;
 		this.mipLevels = mipLevels;
 	}
 
 	public static GpuTexture create(WebGPUContext ctx, int width, int height, int mipLevels, String label) {
+		return create(ctx, width, height, mipLevels, label, false);
+	}
+
+	/**
+	 * @param renderable also usable as a colour attachment, which is what {@code glCopyTexSubImage2D}
+	 *     needs: the framebuffer region is DRAWN into the texture rather than copied, because the two
+	 *     are neither the same format nor the same way up. Usage cannot be widened after creation, so
+	 *     a texture the game later copies into is rebuilt rather than adjusted; see
+	 *     {@code TextureStore.makeRenderable}. Off by default -- every texture asking for it would
+	 *     make every texture a render target, which some backends allocate differently.
+	 */
+	public static GpuTexture create(WebGPUContext ctx, int width, int height, int mipLevels,
+			String label, boolean renderable) {
 		try (Arena tmp = Arena.ofConfined()) {
 			MemorySegment desc = WGPUTextureDescriptor.allocate(tmp);
 			Shaders.stringView(tmp, WGPUTextureDescriptor.label(desc), label);
+			// COPY_SRC on every texture, not just renderable ones: it is what lets a texture the game
+			// starts copying into halfway through a run keep the image it already held, by copying the
+			// old texture into the rebuilt one. It costs nothing to ask for.
 			WGPUTextureDescriptor.usage(desc,
-				Flags.TEXTURE_USAGE_TEXTURE_BINDING | Flags.TEXTURE_USAGE_COPY_DST);
+				Flags.TEXTURE_USAGE_TEXTURE_BINDING | Flags.TEXTURE_USAGE_COPY_DST
+					| Flags.TEXTURE_USAGE_COPY_SRC
+					| (renderable ? Flags.TEXTURE_USAGE_RENDER_ATTACHMENT : 0L));
 			WGPUTextureDescriptor.dimension(desc, WGPUTextureDimension_2D());
 			WGPUTextureDescriptor.format(desc, WGPUTextureFormat_RGBA8Unorm());
 			WGPUTextureDescriptor.mipLevelCount(desc, Math.max(1, mipLevels));
@@ -70,7 +91,32 @@ public final class GpuTexture implements AutoCloseable {
 				wgpuTextureRelease(texture);
 				throw new IllegalStateException("texture view creation failed for '" + label + "'");
 			}
-			return new GpuTexture(ctx, texture, view, width, height, Math.max(1, mipLevels));
+			MemorySegment attachment = MemorySegment.NULL;
+			if (renderable) {
+				// A SECOND view, covering level 0 only. The sampling view above spans the whole mip
+				// chain, and a colour attachment must name exactly one level -- so a mipmapped texture
+				// could not be drawn into through it at all.
+				MemorySegment viewDesc = com.periut.webgpu.WGPUTextureViewDescriptor.allocate(tmp);
+				Shaders.stringView(tmp, com.periut.webgpu.WGPUTextureViewDescriptor.label(viewDesc),
+					label + "-attachment");
+				com.periut.webgpu.WGPUTextureViewDescriptor.format(viewDesc,
+					WGPUTextureFormat_RGBA8Unorm());
+				com.periut.webgpu.WGPUTextureViewDescriptor.dimension(viewDesc,
+					WGPUTextureViewDimension_2D());
+				com.periut.webgpu.WGPUTextureViewDescriptor.baseMipLevel(viewDesc, 0);
+				com.periut.webgpu.WGPUTextureViewDescriptor.mipLevelCount(viewDesc, 1);
+				com.periut.webgpu.WGPUTextureViewDescriptor.baseArrayLayer(viewDesc, 0);
+				com.periut.webgpu.WGPUTextureViewDescriptor.arrayLayerCount(viewDesc, 1);
+				com.periut.webgpu.WGPUTextureViewDescriptor.aspect(viewDesc, WGPUTextureAspect_All());
+				attachment = wgpuTextureCreateView(texture, viewDesc);
+				if (attachment.equals(MemorySegment.NULL)) {
+					wgpuTextureViewRelease(view);
+					wgpuTextureRelease(texture);
+					throw new IllegalStateException("attachment view creation failed for '" + label + "'");
+				}
+			}
+			return new GpuTexture(ctx, texture, view, attachment, width, height,
+				Math.max(1, mipLevels));
 		}
 	}
 
@@ -238,6 +284,15 @@ public final class GpuTexture implements AutoCloseable {
 		return view;
 	}
 
+	/** The level-0 view a pass draws into, or NULL when this texture was not made renderable. */
+	public MemorySegment attachmentView() {
+		return attachmentView;
+	}
+
+	public boolean renderable() {
+		return !attachmentView.equals(MemorySegment.NULL);
+	}
+
 	public MemorySegment handle() {
 		return texture;
 	}
@@ -256,6 +311,7 @@ public final class GpuTexture implements AutoCloseable {
 
 	@Override
 	public void close() {
+		if (!attachmentView.equals(MemorySegment.NULL)) wgpuTextureViewRelease(attachmentView);
 		if (!view.equals(MemorySegment.NULL)) wgpuTextureViewRelease(view);
 		if (!texture.equals(MemorySegment.NULL)) wgpuTextureRelease(texture);
 	}

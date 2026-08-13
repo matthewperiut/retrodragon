@@ -253,6 +253,19 @@ public final class WebGpuRenderer implements AutoCloseable {
 		return view;
 	}
 
+	/**
+	 * The texture behind {@link #colorView()}, for a mid-frame copy out of it.
+	 *
+	 * <p>Whichever of the two this frame is drawing into: the drawable, or the offscreen target an
+	 * uncapped frame renders to instead. Both carry {@code COPY_SRC}.
+	 */
+	public MemorySegment colorTexture() {
+		if (renderingOffscreen) {
+			return offscreen == null ? MemorySegment.NULL : offscreen.handle();
+		}
+		return surface.currentTexture();
+	}
+
 	public MemorySegment depthView() {
 		return depth.view();
 	}
@@ -277,14 +290,22 @@ public final class WebGpuRenderer implements AutoCloseable {
 		if (frame == null || view.equals(MemorySegment.NULL)) {
 			return;
 		}
+		// colorTexture(), NOT the drawable: an UNCAPPED frame never acquires one, so
+		// surface.currentTexture() is NULL there -- and a NULL texture handed to Dawn's copy
+		// validation is not an error message, it is a segfault inside the game.
+		MemorySegment texture = colorTexture();
+		if (texture.equals(MemorySegment.NULL)) {
+			System.err.println("[RetroDragon] screenshot skipped: no colour texture this frame");
+			return;
+		}
 		// Submit first: readback copies from the texture, and the draws have to have happened.
 		frame.submit();
-		byte[] pixels = com.periut.retrodragon.gpu.Readback.rgba(ctx, surface.currentTexture(),
-			width, height);
+		byte[] pixels = com.periut.retrodragon.gpu.Readback.rgba(ctx, texture, width, height);
 		try {
 			java.awt.image.BufferedImage image =
 				new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_RGB);
-			boolean bgra = surface.format() == com.periut.webgpu.webgpu_h.WGPUTextureFormat_BGRA8Unorm();
+			boolean bgra = (renderingOffscreen ? offscreen.format() : surface.format())
+				== com.periut.webgpu.webgpu_h.WGPUTextureFormat_BGRA8Unorm();
 			for (int y = 0; y < height; y++) {
 				for (int x = 0; x < width; x++) {
 					int i = (y * width + x) * 4;

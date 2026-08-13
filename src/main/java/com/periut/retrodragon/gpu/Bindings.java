@@ -121,6 +121,70 @@ public final class Bindings {
 		return layout;
 	}
 
+	/**
+	 * A sampler at 0 and a texture at 1, with no uniform block at all -- what a full-screen pass whose
+	 * only parameter is the pass viewport needs. See {@code copytex.wgsl}.
+	 *
+	 * <p>Separate from {@link #fixedFunctionLayout} rather than reusing it with a dummy buffer: that
+	 * layout's uniform binding is dynamically offset, so every draw through it has to supply an offset
+	 * array, and a group built for it needs a uniform buffer that exists. Neither has anything to do
+	 * with copying a rectangle.
+	 */
+	public static MemorySegment samplerTextureLayout(WebGPUContext ctx, Arena arena, String label) {
+		MemorySegment entries = WGPUBindGroupLayoutEntry.allocateArray(2, arena);
+
+		MemorySegment sampler = WGPUBindGroupLayoutEntry.asSlice(entries, 0);
+		WGPUBindGroupLayoutEntry.binding(sampler, 0);
+		WGPUBindGroupLayoutEntry.visibility(sampler, Flags.SHADER_STAGE_FRAGMENT);
+		WGPUSamplerBindingLayout.type(WGPUBindGroupLayoutEntry.sampler(sampler),
+			WGPUSamplerBindingType_Filtering());
+
+		MemorySegment texture = WGPUBindGroupLayoutEntry.asSlice(entries, 1);
+		WGPUBindGroupLayoutEntry.binding(texture, 1);
+		WGPUBindGroupLayoutEntry.visibility(texture, Flags.SHADER_STAGE_FRAGMENT);
+		MemorySegment textureLayout = WGPUBindGroupLayoutEntry.texture(texture);
+		WGPUTextureBindingLayout.sampleType(textureLayout, WGPUTextureSampleType_Float());
+		WGPUTextureBindingLayout.viewDimension(textureLayout, WGPUTextureViewDimension_2D());
+		WGPUTextureBindingLayout.multisampled(textureLayout, 0);
+
+		MemorySegment desc = WGPUBindGroupLayoutDescriptor.allocate(arena);
+		Shaders.stringView(arena, WGPUBindGroupLayoutDescriptor.label(desc), label);
+		WGPUBindGroupLayoutDescriptor.entryCount(desc, 2);
+		WGPUBindGroupLayoutDescriptor.entries(desc, entries);
+
+		MemorySegment layout = wgpuDeviceCreateBindGroupLayout(ctx.device(), desc);
+		if (layout.equals(MemorySegment.NULL)) {
+			throw new IllegalStateException("bind group layout creation failed for '" + label + "'");
+		}
+		return layout;
+	}
+
+	/** A group matching {@link #samplerTextureLayout}. */
+	public static MemorySegment samplerTextureGroup(WebGPUContext ctx, Arena arena,
+			MemorySegment layout, String label, MemorySegment sampler, MemorySegment textureView) {
+		MemorySegment entries = WGPUBindGroupEntry.allocateArray(2, arena);
+
+		MemorySegment samplerEntry = WGPUBindGroupEntry.asSlice(entries, 0);
+		WGPUBindGroupEntry.binding(samplerEntry, 0);
+		WGPUBindGroupEntry.sampler(samplerEntry, sampler);
+
+		MemorySegment textureEntry = WGPUBindGroupEntry.asSlice(entries, 1);
+		WGPUBindGroupEntry.binding(textureEntry, 1);
+		WGPUBindGroupEntry.textureView(textureEntry, textureView);
+
+		MemorySegment desc = WGPUBindGroupDescriptor.allocate(arena);
+		Shaders.stringView(arena, WGPUBindGroupDescriptor.label(desc), label);
+		WGPUBindGroupDescriptor.layout(desc, layout);
+		WGPUBindGroupDescriptor.entryCount(desc, 2);
+		WGPUBindGroupDescriptor.entries(desc, entries);
+
+		MemorySegment group = wgpuDeviceCreateBindGroup(ctx.device(), desc);
+		if (group.equals(MemorySegment.NULL)) {
+			throw new IllegalStateException("bind group creation failed for '" + label + "'");
+		}
+		return group;
+	}
+
 	/** Binds a uniform buffer, a sampler and a texture view into one group matching the layout above. */
 	public static MemorySegment fixedFunctionGroup(WebGPUContext ctx, Arena arena, MemorySegment layout,
 			MemorySegment uniformBuffer, long uniformSize,

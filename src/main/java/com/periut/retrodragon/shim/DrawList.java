@@ -149,6 +149,9 @@ public final class DrawList {
 	private int[] segmentFirstBatch = new int[INITIAL_SEGMENTS];
 	private int[] segmentFlags = new int[INITIAL_SEGMENTS];
 	private float[] segmentClear = new float[INITIAL_SEGMENTS * 4];
+	/** Range of {@link #copyTexture} entries to perform BEFORE this segment's pass opens. */
+	private int[] segmentCopyFirst = new int[INITIAL_SEGMENTS];
+	private int[] segmentCopyCount = new int[INITIAL_SEGMENTS];
 	private int segmentCount;
 
 	public DrawList() {
@@ -167,17 +170,29 @@ public final class DrawList {
 	public void clear(boolean color, boolean depth, float r, float g, float b, float a) {
 		int flags = (color ? CLEAR_COLOR : 0) | (depth ? CLEAR_DEPTH : 0);
 		int current = segmentCount - 1;
-		if (segmentFirstBatch[current] == batchCount) {
+		// Coalescing is only safe into a segment that has neither drawn nor COPIED anything: a
+		// segment's copies run before its pass opens, so folding a later clear into one would move
+		// the clear in front of a copy the game made after it -- the copy would then read a cleared
+		// framebuffer instead of the frame it was asking for.
+		if (segmentFirstBatch[current] == batchCount && segmentCopyCount[current] == 0) {
 			segmentFlags[current] |= flags;
 			if (color) {
 				setClear(current, r, g, b, a);
 			}
 			return;
 		}
+		openSegment(flags);
+		setClear(segmentCount - 1, r, g, b, a);
+	}
+
+	/** Starts a segment at the current batch, with no copies of its own yet. */
+	private void openSegment(int flags) {
 		ensureSegments();
 		segmentFirstBatch[segmentCount] = batchCount;
 		segmentFlags[segmentCount] = flags;
-		setClear(segmentCount, r, g, b, a);
+		segmentCopyFirst[segmentCount] = copyCount;
+		segmentCopyCount[segmentCount] = 0;
+		setClear(segmentCount, 0.0F, 0.0F, 0.0F, 1.0F);
 		segmentCount++;
 	}
 
@@ -196,6 +211,109 @@ public final class DrawList {
 		segmentFirstBatch = java.util.Arrays.copyOf(segmentFirstBatch, capacity);
 		segmentFlags = java.util.Arrays.copyOf(segmentFlags, capacity);
 		segmentClear = java.util.Arrays.copyOf(segmentClear, capacity * 4);
+		segmentCopyFirst = java.util.Arrays.copyOf(segmentCopyFirst, capacity);
+		segmentCopyCount = java.util.Arrays.copyOf(segmentCopyCount, capacity);
+	}
+
+	// --- framebuffer copies -----------------------------------------------------------------------
+	//
+	// glCopyTexSubImage2D. Recorded in the frame's order rather than performed at the call, for the
+	// same reason a draw is: at the call there is no encoder, no attachment and no frame -- and the
+	// entire content of the call is WHEN it happens, since it captures everything drawn up to that
+	// point and nothing after it.
+	//
+	// Each copy is attached to a segment and runs before that segment's pass opens, which is exactly
+	// the boundary "after everything recorded so far" needs. A copy therefore ends the current
+	// segment, in the same way a clear does.
+
+	private static final int INITIAL_COPIES = 8;
+
+	private int[] copyTexture = new int[INITIAL_COPIES];
+	private int[] copyDstX = new int[INITIAL_COPIES];
+	private int[] copyDstY = new int[INITIAL_COPIES];
+	private int[] copySrcX = new int[INITIAL_COPIES];
+	private int[] copySrcY = new int[INITIAL_COPIES];
+	private int[] copyWidth = new int[INITIAL_COPIES];
+	private int[] copyHeight = new int[INITIAL_COPIES];
+	private int copyCount;
+
+	/**
+	 * Records one {@code glCopyTexSubImage2D}, in GL's own coordinates.
+	 *
+	 * @param name the destination texture, which must already be renderable -- see
+	 *             {@code TextureStore.makeRenderable}
+	 */
+	public void copyToTexture(int name, int dstX, int dstY, int srcX, int srcY, int width,
+			int height) {
+		if (width <= 0 || height <= 0) {
+			return;
+		}
+		int current = segmentCount - 1;
+		// A segment that has drawn something, or that will clear when its pass opens, cannot take
+		// this copy: it would run before both. An empty one that only holds earlier copies can.
+		if (segmentFirstBatch[current] != batchCount || segmentFlags[current] != 0) {
+			openSegment(0);
+			current = segmentCount - 1;
+		}
+		if (copyCount == copyTexture.length) {
+			int capacity = copyCount * 2;
+			copyTexture = java.util.Arrays.copyOf(copyTexture, capacity);
+			copyDstX = java.util.Arrays.copyOf(copyDstX, capacity);
+			copyDstY = java.util.Arrays.copyOf(copyDstY, capacity);
+			copySrcX = java.util.Arrays.copyOf(copySrcX, capacity);
+			copySrcY = java.util.Arrays.copyOf(copySrcY, capacity);
+			copyWidth = java.util.Arrays.copyOf(copyWidth, capacity);
+			copyHeight = java.util.Arrays.copyOf(copyHeight, capacity);
+		}
+		copyTexture[copyCount] = name;
+		copyDstX[copyCount] = dstX;
+		copyDstY[copyCount] = dstY;
+		copySrcX[copyCount] = srcX;
+		copySrcY[copyCount] = srcY;
+		copyWidth[copyCount] = width;
+		copyHeight[copyCount] = height;
+		copyCount++;
+		segmentCopyCount[current]++;
+	}
+
+	public int copyCount() {
+		return copyCount;
+	}
+
+	public int segmentCopyFirst(int segment) {
+		return segmentCopyFirst[segment];
+	}
+
+	public int segmentCopyCount(int segment) {
+		return segmentCopyCount[segment];
+	}
+
+	public int copyTexture(int copy) {
+		return copyTexture[copy];
+	}
+
+	public int copyDstX(int copy) {
+		return copyDstX[copy];
+	}
+
+	public int copyDstY(int copy) {
+		return copyDstY[copy];
+	}
+
+	public int copySrcX(int copy) {
+		return copySrcX[copy];
+	}
+
+	public int copySrcY(int copy) {
+		return copySrcY[copy];
+	}
+
+	public int copyWidth(int copy) {
+		return copyWidth[copy];
+	}
+
+	public int copyHeight(int copy) {
+		return copyHeight[copy];
 	}
 
 	public int segmentCount() {
@@ -610,6 +728,9 @@ public final class DrawList {
 		segmentCount = 1;
 		segmentFirstBatch[0] = 0;
 		segmentFlags[0] = 0;
+		copyCount = 0;
+		segmentCopyFirst[0] = 0;
+		segmentCopyCount[0] = 0;
 		setClear(0, 0.0F, 0.0F, 0.0F, 1.0F);
 	}
 }
