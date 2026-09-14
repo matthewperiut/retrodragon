@@ -55,41 +55,35 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	};
 
 	/**
-	 * Terrain in beta's layout, minus the normal -- {@code terrain.wgsl} does not declare one, so the
-	 * pipeline must not either. The bytes are still there in the buffer; they are simply not fetched.
-	 */
-	private static final int[][] TERRAIN_LEGACY_ATTRIBUTES = {
-		{ 0, 0, WGPUVertexFormat_Float32x3() },
-		{ 1, 12, WGPUVertexFormat_Float32x2() },
-		{ 2, 20, WGPUVertexFormat_Unorm8x4() },
-	};
-
-	/** The 20-byte packing; see {@link TerrainVertex} for why each field is the width it is. */
-	private static final int[][] TERRAIN_COMPACT_ATTRIBUTES = {
-		{ 0, 0, WGPUVertexFormat_Float32x3() },
-		{ 1, 12, WGPUVertexFormat_Unorm16x2() },
-		{ 2, 16, WGPUVertexFormat_Unorm8x4() },
-	};
-
-	/**
-	 * Either layout plus the sprite size a stitched atlas needs.
+	 * Terrain's layout, which is the one this project packs itself and so the one that can change.
 	 *
-	 * <p>{@code Uint8x4} rather than a single byte because WebGPU has no 8-bit scalar vertex format;
-	 * only .x is read. The legacy variant costs nothing -- it lands in beta's existing pad word.
+	 * <p>Built rather than tabulated: position, texture coordinate and colour are always there, and
+	 * each of the two optional fields -- the sprite size a stitched atlas needs, the light pair a
+	 * uniform lightmap needs -- is in or out on its own. Four static tables became eight the moment
+	 * there were two of them, and a table nobody reads is a table that drifts.
+	 *
+	 * <p>No normal. {@code terrain.wgsl} does not declare one, so the pipeline must not either; the
+	 * bytes are still in the legacy buffer and are simply not fetched.
+	 *
+	 * <p>{@code Uint8x2} for the sprite size rather than a single byte because WebGPU has no 8-bit
+	 * scalar vertex format; only .x is read.
 	 */
-	private static final int[][] TERRAIN_COMPACT_SPRITE_ATTRIBUTES = {
-		{ 0, 0, WGPUVertexFormat_Float32x3() },
-		{ 1, 12, WGPUVertexFormat_Unorm16x2() },
-		{ 2, 16, WGPUVertexFormat_Unorm8x4() },
-		{ 3, 20, WGPUVertexFormat_Uint8x4() },
-	};
-
-	private static final int[][] TERRAIN_LEGACY_SPRITE_ATTRIBUTES = {
-		{ 0, 0, WGPUVertexFormat_Float32x3() },
-		{ 1, 12, WGPUVertexFormat_Float32x2() },
-		{ 2, 20, WGPUVertexFormat_Unorm8x4() },
-		{ 3, 28, WGPUVertexFormat_Uint8x4() },
-	};
+	private static int[][] terrainAttributes(boolean compact) {
+		java.util.List<int[]> attributes = new java.util.ArrayList<>(5);
+		attributes.add(new int[] { 0, 0, WGPUVertexFormat_Float32x3() });
+		attributes.add(new int[] { 1, 12,
+			compact ? WGPUVertexFormat_Unorm16x2() : WGPUVertexFormat_Float32x2() });
+		attributes.add(new int[] { 2, compact ? 16 : 20, WGPUVertexFormat_Unorm8x4() });
+		if (TerrainVertex.spriteClamp()) {
+			attributes.add(new int[] { 3, TerrainVertex.spriteOffset(compact),
+				WGPUVertexFormat_Uint8x2() });
+		}
+		if (TerrainLight.enabled()) {
+			attributes.add(new int[] { 4, TerrainVertex.lightOffset(compact),
+				WGPUVertexFormat_Unorm8x2() });
+		}
+		return attributes.toArray(new int[0][]);
+	}
 
 	/** Indexed by {@code PipelineKey.PROGRAM_*}. */
 	private static final String[] SHADER_PATHS = {
@@ -103,6 +97,10 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 	/** Delimits the lines that only exist when the vertex carries a sprite size. */
 	private static final String SPRITE_BEGIN = "//@SPRITE_BEGIN";
 	private static final String SPRITE_END = "//@SPRITE_END";
+
+	/** Delimits the lines that only exist when the vertex carries a light pair. */
+	private static final String LIGHT_BEGIN = "//@LIGHT_BEGIN";
+	private static final String LIGHT_END = "//@LIGHT_END";
 
 	private static final String ALPHA_TEST_BEGIN = "//@ALPHA_TEST_BEGIN";
 	private static final String ALPHA_TEST_END = "//@ALPHA_TEST_END";
@@ -162,7 +160,12 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 					throw new IllegalStateException("no program registered with id " + program);
 				}
 				label = spec.name();
-				source = spec.source();
+				// Through the same substitution the engine's own terrain program gets. An extension
+				// building on EngineWgsl.TERRAIN_VERTEX_IN carries the optional-field markers with it,
+				// and which of those fields the vertex actually has is not something it can know --
+				// it depends on the backend and on which content API is installed.
+				source = spec.layout() == com.periut.retrodragon.api.ProgramSpec.VertexLayout.TERRAIN
+					? optionalTerrainFields(spec.source()) : spec.source();
 			}
 			MemorySegment module = Shaders.compile(ctx, arena, label, source);
 			if (module.equals(MemorySegment.NULL)) {
@@ -300,11 +303,8 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 		String source = source(SHADER_PATHS[index]);
 		boolean terrain = index == PipelineKey.PROGRAM_TERRAIN
 			|| index == PipelineKey.PROGRAM_TERRAIN_OPAQUE;
-		if (terrain && !TerrainVertex.spriteClamp()) {
-			// No stitched atlas: the vertex does not carry a sprite size, so the attribute is not in
-			// the pipeline's layout either. Reading a location the layout does not declare is invalid
-			// WGSL, hence a textual cut rather than a branch -- the same reasoning as the alpha test.
-			source = strip(source, SPRITE_BEGIN, SPRITE_END);
+		if (terrain) {
+			source = optionalTerrainFields(source);
 		}
 		if (index != PipelineKey.PROGRAM_TERRAIN_OPAQUE) {
 			return source;
@@ -316,6 +316,23 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 				+ " / " + ALPHA_TEST_END + " markers; the opaque variant cannot be built");
 		}
 		return source.substring(0, begin) + source.substring(end + ALPHA_TEST_END.length());
+	}
+
+	/**
+	 * Cuts out the terrain fields this run's vertex does not carry.
+	 *
+	 * <p>Reading a location the pipeline layout does not declare is invalid WGSL, so neither of the
+	 * two optional fields can be a runtime branch -- the pipeline is compiled long before the branch
+	 * would be taken. Same reasoning as the alpha test, and the same textual cut.
+	 */
+	private static String optionalTerrainFields(String source) {
+		if (!TerrainVertex.spriteClamp()) {
+			source = strip(source, SPRITE_BEGIN, SPRITE_END);
+		}
+		if (!TerrainLight.enabled()) {
+			source = strip(source, LIGHT_BEGIN, LIGHT_END);
+		}
+		return source;
 	}
 
 	/** Cuts every {@code begin}..{@code end} region out, markers included. */
@@ -380,12 +397,7 @@ public final class FixedFunctionPipelines implements AutoCloseable {
 			// Tessellator wrote and must describe them exactly as they are.
 			.vertexLayout(
 				terrain ? TerrainVertex.stride(compactTerrain) : VERTEX_STRIDE,
-				terrain
-					? (TerrainVertex.spriteClamp()
-						? (compactTerrain
-							? TERRAIN_COMPACT_SPRITE_ATTRIBUTES : TERRAIN_LEGACY_SPRITE_ATTRIBUTES)
-						: (compactTerrain ? TERRAIN_COMPACT_ATTRIBUTES : TERRAIN_LEGACY_ATTRIBUTES))
-					: VERTEX_ATTRIBUTES)
+				terrain ? terrainAttributes(compactTerrain) : VERTEX_ATTRIBUTES)
 			.layout(shared.layoutFor(program));
 
 		if (depthOnly) {

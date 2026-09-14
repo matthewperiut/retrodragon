@@ -139,6 +139,8 @@ public final class RenderBackend {
 		// builds any: a buffer packed four-to-a-quad and drawn as a triangle list is garbage.
 		QuadVertices.select(api == Api.WEBGPU);
 		TerrainVertex.select(api == Api.WEBGPU);
+		// After TerrainVertex, which is what decides whether a vertex has room for the light pair.
+		TerrainLight.select(api == Api.WEBGPU);
 		// Through the logger, not System.out: this is the one line that says which graphics API the
 		// run is actually on, and it has to be in the log file a bug report attaches.
 		com.periut.retrodragon.RetroDragon.LOGGER.info("graphics: {}",

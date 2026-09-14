@@ -29,6 +29,8 @@ import org.lwjgl.opengl.GL20;
 public final class TerrainShader {
 	/** Generic vertex attribute carrying the per-sprite pitch; see {@link #build()} for the slot. */
 	public static final int SPRITE_ATTRIB = 7;
+	/** Generic vertex attribute carrying the daylight/block-floor light pair; see {@link #build()}. */
+	public static final int LIGHT_ATTRIB = 6;
 
 	private static int program;
 	private static int uAtlasSize;
@@ -36,6 +38,7 @@ public final class TerrainShader {
 	private static int uMaxLod;
 	private static int uRgss;
 	private static int uFogMode;
+	private static int uAmbientDarkness;
 	private static boolean broken;
 	private static boolean active;
 
@@ -85,6 +88,10 @@ public final class TerrainShader {
 		GL20.glUniform1f(uMaxLod, clamped ? maxLod : 0.0F);
 		GL20.glUniform1f(uRgss, RetroSettings.isRgss() && clamped ? 1.0F : 0.0F);
 		GL20.glUniform1i(uFogMode, FogState.mode());
+		// Negative says "this run's vertices carry no light pair", which is what the vertex stage
+		// reads as "leave the colour alone". See terrain.vsh.
+		GL20.glUniform1f(uAmbientDarkness,
+			TerrainLight.enabled() ? TerrainAppearance.ambientDarkness() : -1.0F);
 		active = true;
 		return true;
 	}
@@ -94,6 +101,9 @@ public final class TerrainShader {
 			// Left enabled it would stay bound to a freed VBO for every later draw in the frame.
 			if (TerrainVertex.spriteClamp()) {
 				GL20.glDisableVertexAttribArray(SPRITE_ATTRIB);
+			}
+			if (TerrainLight.enabled()) {
+				GL20.glDisableVertexAttribArray(LIGHT_ATTRIB);
 			}
 			GL20.glUseProgram(0);
 			active = false;
@@ -118,6 +128,9 @@ public final class TerrainShader {
 			// 0 vertex, 2 normal, 3 colour, 4 secondary colour, 5 fog coord, 8..15 texture coords.
 			// Slot 7 is outside all of them, so this cannot land on top of an array beta is filling.
 			GL20.glBindAttribLocation(id, SPRITE_ATTRIB, "spriteTexels");
+			// Slot 6 for the same reason as 7: outside every conventional alias of a fixed-function
+			// array, so it cannot land on top of one beta is filling.
+			GL20.glBindAttribLocation(id, LIGHT_ATTRIB, "terrainLight");
 			GL20.glLinkProgram(id);
 			if (GL20.glGetProgrami(id, GL20.GL_LINK_STATUS) == GL11.GL_FALSE) {
 				String log = GL20.glGetProgramInfoLog(id, 2048);
@@ -134,6 +147,7 @@ public final class TerrainShader {
 			uMaxLod = GL20.glGetUniformLocation(program, "maxLod");
 			uRgss = GL20.glGetUniformLocation(program, "rgss");
 			uFogMode = GL20.glGetUniformLocation(program, "fogMode");
+			uAmbientDarkness = GL20.glGetUniformLocation(program, "ambientDarkness");
 			RetroDragon.detail("terrain shader active");
 			return true;
 		} catch (Throwable t) {
@@ -170,6 +184,10 @@ public final class TerrainShader {
 
 	private static boolean fail(String message) {
 		broken = true;
+		// Terrain is about to be drawn by fixed function, which has no vertex stage to apply a light
+		// pair in -- so every section already meshed is carrying its light somewhere nothing will
+		// read and would draw at its unlit tint. Hand the lightmap back and ask for a rebuild.
+		TerrainLight.fallBack();
 		if (message != null) {
 			RetroDragon.LOGGER.error("terrain shader disabled ({}), falling back to fixed function", message);
 		} else {

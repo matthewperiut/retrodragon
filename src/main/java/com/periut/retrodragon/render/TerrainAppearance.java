@@ -56,6 +56,25 @@ public final class TerrainAppearance {
 		return BlockAtlas.tileTexels();
 	}
 
+	/**
+	 * How far the sky has been darkened, 0 at noon and 11 at midnight, rain and thunder included.
+	 *
+	 * <p>This is the number beta used to bake into every terrain vertex, and re-mesh the world for
+	 * whenever it stepped. {@link TerrainLight} puts it here instead. Read fresh at each terrain
+	 * batch rather than cached: it is one field read, and a stale copy is a world a step behind the
+	 * sky it is under.
+	 *
+	 * <p>0 with no world, which is the value that changes nothing -- the GUI and the menu background
+	 * draw no terrain anyway.
+	 */
+	public static float ambientDarkness() {
+		if (!TerrainLight.enabled()) {
+			return 0.0F;
+		}
+		Minecraft client = GameOptions.client();
+		return client == null || client.world == null ? 0.0F : client.world.ambientDarkness;
+	}
+
 	/** True when the player has asked for the anti-aliased world. */
 	public static boolean enabled() {
 		Minecraft client = GameOptions.client();

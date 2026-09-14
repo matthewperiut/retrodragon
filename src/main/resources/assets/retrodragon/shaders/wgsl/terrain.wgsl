@@ -37,7 +37,10 @@ struct Uniforms {
     lightDir1   : vec4<f32>,
     // rgb ambient, w = 1 to enable rotated-grid supersampling
     lightAmbient: vec4<f32>,
-    // xyz vertex-attribute flags, w = the atlas's grid pitch in texels (0 = stitched, no grid)
+    // xyz vertex-attribute flags, w = two terrain numbers in one lane: the atlas's grid pitch in
+    // texels (0 = stitched, no grid) plus 1024 times the world's ambient darkness. The block is
+    // exactly 256 bytes -- WebGPU's dynamic-offset alignment -- and had no free lane left, so the
+    // darkness rides in the one field terrain already owns. See GlState.writeUniforms.
     vertexFlags : vec4<f32>,
 };
 
@@ -58,13 +61,20 @@ struct Uniforms {
 // The pipeline declares it or does not; a shader that reads an undeclared location is invalid, so the
 // program is compiled with SPRITE_CLAMP substituted for the two lines that touch it. See
 // FixedFunctionPipelines.source.
+// light is present only when the uniform lightmap is on -- see TerrainLight. x is the vertex's
+// luminance at full daylight, y the luminance block light alone gives it; the vertex stage turns
+// the pair plus the darkness uniform into the one number beta used to bake in here. Substituted out
+// of the source with the attribute, for the same reason as spriteTexels.
 struct VertexIn {
     @location(0) position : vec3<f32>,
     @location(1) uv       : vec2<f32>,
     @location(2) color    : vec4<f32>,
     //@SPRITE_BEGIN
-    @location(3) spriteTexels : vec4<u32>,
+    @location(3) spriteTexels : vec2<u32>,
     //@SPRITE_END
+    //@LIGHT_BEGIN
+    @location(4) light    : vec2<f32>,
+    //@LIGHT_END
 };
 
 struct VertexOut {
@@ -92,7 +102,27 @@ fn vs_main(in : VertexIn) -> VertexOut {
     out.uv = select(vec2<f32>(0.0, 0.0), in.uv, u.vertexFlags.z > 0.5);
     out.eye = eye.xyz;
     out.fogDepth = length(eye.xyz);
-    out.color = in.color * u.colorModulator;
+    // Beta's own brightness curve, applied here instead of baked into the colour by the mesher.
+    //
+    // The vertex carries the luminance it has at full daylight, which is a value ON that curve, so
+    // inverting it recovers the (fractional, because smooth lighting averages four corners) light
+    // level that produced it. Subtract the darkness the uniform carries, put it back through the
+    // curve, and take whichever is brighter -- that or the light a torch gives it, which no time of
+    // day can take away.
+    //
+    // At darkness 0 the inversion and the curve cancel exactly and this is the colour beta would
+    // have baked. Both halves of the curve are Dimension.initBrightnessTable written as a function
+    // of level/15; see TerrainLight.
+    var lum = 1.0;
+    //@LIGHT_BEGIN
+    let above = max(in.light.x - 0.05, 0.0);
+    let daylightLevel = 4.0 * above / (0.95 + 3.0 * above);
+    let darkness = floor(u.vertexFlags.w * (1.0 / 1024.0));
+    let level = max(daylightLevel - darkness * (1.0 / 15.0), 0.0);
+    lum = max(level / (4.0 - 3.0 * level) * 0.95 + 0.05, in.light.y);
+    //@LIGHT_END
+    // Alpha is left alone: light does not make water or glass more transparent.
+    out.color = vec4<f32>(in.color.rgb * lum, in.color.a) * u.colorModulator;
     // 0 when the layout does not carry it, which reads as "no sprite" and leaves the uniform pitch in
     // charge -- the grid case, and the honest fallback for a sprite the table could not place.
     out.spriteTexels = 0.0;
@@ -116,7 +146,8 @@ fn fs_main(in : VertexOut) -> @location(0) vec4<f32> {
     // TextureStitcher places a sprite of size S at a multiple of S, so floor(uv / S) * S below finds
     // its origin exactly as it finds a tile's -- the rest of this function does not know the
     // difference. Zero means "not carried, or unplaceable", and the uniform grid pitch stands.
-    var tileTexels = u.vertexFlags.w;
+    // The grid pitch shares its lane with the ambient darkness the vertex stage used; take it back.
+    var tileTexels = u.vertexFlags.w - floor(u.vertexFlags.w * (1.0 / 1024.0)) * 1024.0;
     if (in.spriteTexels > 0.0) {
         tileTexels = in.spriteTexels;
     }

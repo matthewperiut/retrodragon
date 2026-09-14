@@ -701,6 +701,7 @@ public final class WebGpuFrame {
 		gl.setTopology(Primitives.topology(glMode));
 		gl.state().setTerrainParams(TerrainAppearance.atlasTexels(), TerrainAppearance.tileTexels(),
 			TerrainAppearance.maxLod(), TerrainAppearance.rgss());
+		gl.state().setAmbientDarkness(TerrainAppearance.ambientDarkness());
 		int texture = gl.boundTexture();
 		terrainBatches++;
 		terrainVertices += vertexCount;

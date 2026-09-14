@@ -127,6 +127,7 @@ public final class GlState {
 	private float tileTexels = 16.0F;
 	private float maxLod;
 	private float rgss;
+	private float ambientDarkness;
 
 	/**
 	 * @param atlasTexels the block atlas's width in texels; 256 for vanilla, larger for a texture pack
@@ -136,6 +137,19 @@ public final class GlState {
 	 * @param maxLod      how far the mip chain may be walked; 0 disables mipmapping
 	 * @param rgss        1 to enable rotated-grid supersampling of the atlas
 	 */
+	/**
+	 * The world's {@code ambientDarkness}, 0 at noon and 11 at midnight, which the terrain program
+	 * applies to every vertex's baked daylight luminance. See {@code TerrainLight}.
+	 *
+	 * <p>Separate from {@link #setTerrainParams} because it changes on its own schedule -- the time
+	 * of day, and every rain and thunder transition -- and because it does not get a lane of its own:
+	 * it rides in the grid pitch's, which is the last one the 256-byte block has. Left at 0 by
+	 * default, so a block written without it is byte-for-byte the one this wrote before.
+	 */
+	public void setAmbientDarkness(float darkness) {
+		this.ambientDarkness = darkness;
+	}
+
 	public void setTerrainParams(float atlasTexels, float tileTexels, float maxLod, float rgss) {
 		this.atlasTexels = atlasTexels;
 		this.tileTexels = tileTexels;
@@ -509,7 +523,11 @@ public final class GlState {
 		u[60] = vertexColors ? 1.0F : 0.0F;
 		u[61] = vertexNormals ? 1.0F : 0.0F;
 		u[62] = vertexTexture ? 1.0F : 0.0F;
-		u[63] = tileTexels;
+		// Two numbers, one lane. The grid pitch is a texel count well under 1024, so scaling the
+		// ambient darkness by 1024 and adding leaves both exactly recoverable in a float -- and the
+		// block stays at 256 bytes, which is WebGPU's dynamic-offset alignment. 260 would round every
+		// per-draw slot to 512.
+		u[63] = tileTexels + ambientDarkness * 1024.0F;
 
 		// Only touch the direct buffer when the block actually changed. Three quarters of the
 		// captures in a frame produce a block byte-identical to the one before -- that is exactly
@@ -698,6 +716,16 @@ public final class GlState {
 			new float[] { 256.0F, 4.0F, 1.0F, 16.0F },
 			"the terrain parameters must land in the w lanes the terrain program reads");
 
+		// The pitch and the ambient darkness share that last lane, so the shader's unpacking is
+		// checked here rather than discovered in the world: a darkness that swallowed the pitch would
+		// read as a stitched atlas and turn off clamping and mipmapping for everything.
+		terrain.setAmbientDarkness(11.0F);
+		float[] shared = snapshot(terrain);
+		float darkness = (float) Math.floor(shared[flagsW] / 1024.0F);
+		expect(new float[] { darkness, shared[flagsW] - darkness * 1024.0F },
+			new float[] { 11.0F, 16.0F },
+			"the grid pitch and the ambient darkness must both survive their shared lane");
+
 		System.out.println("GlState self-check OK");
 	}
 
@@ -782,8 +810,11 @@ public final class GlState {
 				case 7 -> state.setLightingEnabled(random.nextBoolean());
 				case 8 -> state.setLightModelAmbient(random.nextFloat(), random.nextFloat(),
 					random.nextFloat());
-				case 9 -> state.setTerrainParams(random.nextInt(2048) + 1, random.nextInt(64),
-					random.nextInt(8), random.nextInt(2));
+				case 9 -> {
+					state.setTerrainParams(random.nextInt(2048) + 1, random.nextInt(64),
+						random.nextInt(8), random.nextInt(2));
+					state.setAmbientDarkness(random.nextInt(12));
+				}
 				default -> state.matrixMode(random.nextBoolean() ? MODE_PROJECTION : MODE_MODELVIEW);
 			}
 
@@ -854,7 +885,7 @@ public final class GlState {
 		f.put(vertexColors ? 1.0F : 0.0F)
 			.put(vertexNormals ? 1.0F : 0.0F)
 			.put(vertexTexture ? 1.0F : 0.0F)
-			.put(tileTexels);
+			.put(tileTexels + ambientDarkness * 1024.0F);
 		out.position(0).limit(UNIFORM_BYTES);
 		return out;
 	}

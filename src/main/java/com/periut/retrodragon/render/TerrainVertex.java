@@ -70,18 +70,48 @@ public final class TerrainVertex {
 	public static final int LEGACY_STRIDE = 32;
 	/** Normal dropped, texture coordinate to unorm16. */
 	public static final int COMPACT_STRIDE = 20;
-	/** Compact plus the sprite size a stitched atlas needs; see {@link #spriteClamp()}. */
-	public static final int SPRITE_STRIDE = 24;
+	/**
+	 * Compact plus ONE more word, which holds both optional fields.
+	 *
+	 * <p>The stitched-atlas sprite size is one byte and the light pair is two, so they share a word
+	 * rather than taking one each: sprite at the first byte, the pair at the third and fourth. That
+	 * is what keeps the compact vertex at 24 bytes with both present, and the legacy one at beta's
+	 * own 32 -- where the whole word is the pad it never read.
+	 */
+	public static final int EXTRA_STRIDE = 24;
 
 	/**
 	 * Byte offset of the sprite size within a vertex.
 	 *
 	 * <p>The legacy layout gets it for FREE: beta's 32-byte vertex ends in a pad word that nothing
 	 * reads, so the byte lands there and the stride does not move. Only the compact layout, which has
-	 * no slack by construction, grows -- and only when a stitched atlas is what is installed.
+	 * no slack by construction, grows -- and only when a stitched atlas or the lightmap is installed,
+	 * since the two share that word.
 	 */
 	public static int spriteOffset(boolean compact) {
 		return compact ? 20 : 28;
+	}
+
+	/** The sprite size positioned in the word it shares with the light pair; see {@link #wordSlot}. */
+	public static int spriteBits(int texels) {
+		int size = Math.min(Math.max(texels, 0), 255);
+		return java.nio.ByteOrder.nativeOrder() == java.nio.ByteOrder.LITTLE_ENDIAN
+			? size : size << 24;
+	}
+
+	/** Index of the shared word within a vertex, for a writer that deals in ints. */
+	public static int wordSlot(boolean compact) {
+		return spriteOffset(compact) / 4;
+	}
+
+	/**
+	 * Byte offset of the daylight/block-floor light pair within a vertex.
+	 *
+	 * <p>Two bytes into the word the sprite size starts, so the two fit in one word and neither
+	 * layout has to grow for having both -- see {@link #EXTRA_STRIDE}.
+	 */
+	public static int lightOffset(boolean compact) {
+		return spriteOffset(compact) + 2;
 	}
 
 	/**
@@ -155,7 +185,7 @@ public final class TerrainVertex {
 		if (!compact) {
 			return LEGACY_STRIDE;
 		}
-		return sprite ? SPRITE_STRIDE : COMPACT_STRIDE;
+		return sprite || TerrainLight.enabled() ? EXTRA_STRIDE : COMPACT_STRIDE;
 	}
 
 	/** Ints per terrain vertex; both strides are a whole number of them. */

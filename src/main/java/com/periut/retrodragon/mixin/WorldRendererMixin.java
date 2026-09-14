@@ -7,6 +7,7 @@ import com.periut.retrodragon.Config;
 import com.periut.retrodragon.render.MeshScheduler;
 import com.periut.retrodragon.render.RetroSection;
 import com.periut.retrodragon.render.SectionDrawer;
+import com.periut.retrodragon.render.TerrainLight;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.render.WorldRenderer;
@@ -101,6 +102,47 @@ public abstract class WorldRendererMixin {
 		}
 		if (write < this.dirtyChunks.size()) {
 			this.dirtyChunks.subList(write, this.dirtyChunks.size()).clear();
+		}
+	}
+
+	/**
+	 * The rebuild storm this whole feature exists to remove.
+	 *
+	 * <p>Vanilla's {@code notifyAmbientDarknessChanged} marks EVERY sky-lit section dirty, because the
+	 * time of day is baked into their vertex colours and the only way to change it is to build them
+	 * again. {@code World.tick} fires it whenever {@code ambientDarkness} steps -- twelve values, up
+	 * and down twice a day cycle, plus every rain and thunder transition -- so the visible world is
+	 * re-meshed a couple of dozen times a day for a change that is one number.
+	 *
+	 * <p>With {@link TerrainLight} on, that number is a uniform and the sections are already right.
+	 * Cancelled rather than left to run: the sections it dirties would be rebuilt into identical
+	 * geometry, which is the same stutter for no difference at all.
+	 *
+	 * <p>Not cancelled on the GL backend or under StationAPI, where the light is still baked and the
+	 * sweep is still the only thing that updates it.
+	 */
+	/**
+	 * Rebuilds the world when the lightmap turns out not to be available after all.
+	 *
+	 * <p>Only reachable on the GL backend, and only when its terrain program fails to compile or
+	 * link: fixed function has no vertex stage, so every section meshed so far is carrying its light
+	 * in a pair nothing will read and would draw at its unlit tint. See {@link TerrainLight#fallBack}.
+	 *
+	 * <p>Here rather than at the point the failure is noticed, which is inside the section draw loop
+	 * -- iterating the very meshes {@code reload()} frees.
+	 */
+	@Inject(method = "compileChunks(Lnet/minecraft/entity/LivingEntity;Z)Z", at = @At("HEAD"))
+	private void retrodragon$rebuildWithoutLightmap(LivingEntity camera, boolean partial,
+			CallbackInfoReturnable<Boolean> cir) {
+		if (TerrainLight.takeReload()) {
+			((WorldRenderer) (Object) this).reload();
+		}
+	}
+
+	@Inject(method = "notifyAmbientDarknessChanged()V", at = @At("HEAD"), cancellable = true)
+	private void retrodragon$ambientDarknessIsAUniform(CallbackInfo ci) {
+		if (TerrainLight.enabled()) {
+			ci.cancel();
 		}
 	}
 

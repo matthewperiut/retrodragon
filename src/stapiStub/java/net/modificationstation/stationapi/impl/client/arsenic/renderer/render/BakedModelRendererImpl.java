@@ -16,4 +16,12 @@ public class BakedModelRendererImpl {
 	private void renderQuad(Object blockView, Object state, Object pos, Object quad, float[] box) {
 		throw new AssertionError("compile stub");
 	}
+
+	/**
+	 * Packs one vertex colour. Real signature, because the mixin redirects the CALL and has to name
+	 * its descriptor -- and because it then calls it.
+	 */
+	private int colorF2I(float r, float g, float b) {
+		throw new AssertionError("compile stub");
+	}
 }

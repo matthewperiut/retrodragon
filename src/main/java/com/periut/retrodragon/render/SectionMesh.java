@@ -136,6 +136,14 @@ public final class SectionMesh {
 		GL11.glTexCoordPointer(2, GL11.GL_FLOAT, VertexSink.STRIDE_BYTES, 12L);
 		GL11.glColorPointer(4, GL11.GL_UNSIGNED_BYTE, VertexSink.STRIDE_BYTES, 20L);
 		GL11.glNormalPointer(GL11.GL_BYTE, VertexSink.STRIDE_BYTES, 24L);
+		if (TerrainLight.enabled() && TerrainShader.isActive()) {
+			// Two normalised bytes out of beta's pad word, which nothing else reads. NORMALISED, unlike
+			// the sprite size beside it: these are luminances in 0..1, and the vertex stage wants them
+			// as the floats they were, not as 0..255.
+			GL20.glEnableVertexAttribArray(TerrainShader.LIGHT_ATTRIB);
+			GL20.glVertexAttribPointer(TerrainShader.LIGHT_ATTRIB, 2, GL11.GL_UNSIGNED_BYTE, true,
+				VertexSink.STRIDE_BYTES, TerrainVertex.lightOffset(false));
+		}
 		if (TerrainVertex.spriteClamp() && TerrainShader.isActive()) {
 			// Beta's pad word, which nothing else reads -- so the stitched-atlas pitch rides along in
 			// the legacy layout for free. NOT normalised: the shader wants texels (16, 32), not 0..1.

@@ -2,6 +2,7 @@ package com.periut.retrodragon.mixin.stapi;
 
 import com.periut.retrodragon.render.Capture;
 import com.periut.retrodragon.render.MeshTessellator;
+import com.periut.retrodragon.render.VertexSink;
 
 import net.minecraft.client.render.Tessellator;
 import net.modificationstation.stationapi.impl.client.arsenic.renderer.render.BakedModelRendererImpl;
@@ -33,6 +34,43 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 @Mixin(BakedModelRendererImpl.class)
 public class BakedModelRendererMixin {
 	@Shadow @Final private Tessellator tessellator;
+
+	@Shadow
+	private int colorF2I(float r, float g, float b) {
+		throw new AssertionError("shadow");
+	}
+
+	/**
+	 * Catches each vertex colour as a float, on its way to being packed into a byte.
+	 *
+	 * <p>{@code TerrainLight} recovers a vertex's light by dividing one meshing walk's colour by
+	 * another's, and eight bits is not enough to divide with -- the quotient of two bytes is worth
+	 * about as much as the smaller of them. Beta's own renderer hands its colours to
+	 * {@code Tessellator.color(float, float, float)}, which is where they get caught there; Arsenic
+	 * packs its own and {@code System.arraycopy}s the result straight into the buffer, so this is
+	 * the last point at which the float exists.
+	 *
+	 * <p>Four calls per quad, in vertex order, in both branches of {@code renderQuad} -- the tinted
+	 * one and the plain one. The sum of the three channels is what is kept, for the same reason as
+	 * everywhere else: the light is the same scalar in all three, and a sum cannot be the channel a
+	 * block happens to have no colour in.
+	 *
+	 * <p>Only inside a chunk build. Items, the GUI and the block-damage overlay reach
+	 * {@code renderQuad} too, on the render thread with no capture, and push nothing.
+	 */
+	@Redirect(
+		method = "renderQuad",
+		at = @At(value = "INVOKE",
+			target = "Lnet/modificationstation/stationapi/impl/client/arsenic/renderer/render/"
+				+ "BakedModelRendererImpl;colorF2I(FFF)I"),
+		require = 1)
+	private int retrodragon$captureQuadColor(BakedModelRendererImpl self, float r, float g, float b) {
+		VertexSink sink = Capture.sink();
+		if (sink != null) {
+			sink.pushQuadCorner(r + g + b);
+		}
+		return colorF2I(r, g, b);
+	}
 
 	@Redirect(
 		method = "renderQuad",

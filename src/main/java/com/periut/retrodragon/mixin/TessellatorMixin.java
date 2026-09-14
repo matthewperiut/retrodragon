@@ -194,6 +194,34 @@ public class TessellatorMixin implements com.periut.retrodragon.render.RetroTess
 		}
 	}
 
+	/**
+	 * The colour before the Tessellator rounds it into bytes, which is the only place it exists.
+	 *
+	 * <p>{@code color(float,float,float)} is {@code color((int)(r * 255), ...)}, and eight bits is
+	 * not enough for what {@link com.periut.retrodragon.render.TerrainLight} has to read back out of
+	 * a light walk's colour. So the floats are recorded on the way past.
+	 *
+	 * <p>Not cancelled: the int overload this calls through to is what actually packs the vertex
+	 * colour, and it is still the right thing to do. {@code VertexSink} knows the float came first
+	 * and does not let the rounded version overwrite it.
+	 */
+	@Inject(method = "color(FFF)V", at = @At("HEAD"))
+	private void retrodragon$colorFloat(float r, float g, float b, CallbackInfo ci) {
+		VertexSink sink = Capture.sink();
+		if (sink != null) {
+			sink.colorFloat(r, g, b);
+		}
+	}
+
+	/** The four-argument float overload does not call the three-argument one, so it needs its own. */
+	@Inject(method = "color(FFFF)V", at = @At("HEAD"))
+	private void retrodragon$colorFloatAlpha(float r, float g, float b, float a, CallbackInfo ci) {
+		VertexSink sink = Capture.sink();
+		if (sink != null) {
+			sink.colorFloat(r, g, b);
+		}
+	}
+
 	@Inject(method = "color(IIII)V", at = @At("HEAD"), cancellable = true)
 	private void retroperf$color(int r, int g, int b, int a, CallbackInfo ci) {
 		VertexSink sink = Capture.sink();

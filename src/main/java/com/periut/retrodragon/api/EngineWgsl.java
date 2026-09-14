@@ -64,13 +64,46 @@ public final class EngineWgsl {
 	/**
 	 * The terrain stream: no normal, because beta bakes face shading into the vertex colour and the
 	 * slot was pure bandwidth on the largest stream the game produces.
+	 *
+	 * <p>The light pair is OPTIONAL and the marker comments are load-bearing -- leave them in. Which
+	 * fields a terrain vertex carries depends on the backend and on which content API is installed,
+	 * and the engine cuts the ones this run does not have out of the source before compiling it. A
+	 * program that declares a location the pipeline layout does not is invalid WGSL, so this cannot
+	 * be a runtime branch.
+	 *
+	 * <p>Use it with {@link #TERRAIN_COLOR}, which carries the same markers and so is right either
+	 * way. Calling {@code engineTerrainLight(in.light)} directly is not: the call would outlive the
+	 * field it reads on a run that has no light pair.
 	 */
 	public static final String TERRAIN_VERTEX_IN = """
 		struct VertexIn {
 		    @location(0) position : vec3<f32>,
 		    @location(1) uv       : vec2<f32>,
 		    @location(2) color    : vec4<f32>,
+		    //@LIGHT_BEGIN
+		    @location(4) light    : vec2<f32>,
+		    //@LIGHT_END
 		};
+		""";
+
+	/**
+	 * A terrain vertex's colour with the time of day applied, as {@code terrainColor}.
+	 *
+	 * <p>Paste this into a terrain vertex stage and use {@code terrainColor} in place of
+	 * {@code in.color}. A terrain vertex's colour is its tint and face shade ALONE -- the light was
+	 * taken out of it so that the sun moving no longer means re-meshing the world -- so a program
+	 * that uses {@code in.color} directly draws a world permanently at noon.
+	 *
+	 * <p>The markers are the engine's, and they are why this is a snippet rather than a bare call:
+	 * on a run whose vertices carry no light pair the whole thing is cut out and
+	 * {@code terrainColor} is the colour as beta baked it.
+	 */
+	public static final String TERRAIN_COLOR = """
+		    var terrainColor = in.color;
+		    //@LIGHT_BEGIN
+		    terrainColor = vec4<f32>(
+		        terrainColor.rgb * engineTerrainLight(in.light), terrainColor.a);
+		    //@LIGHT_END
 		""";
 
 	/**
@@ -91,6 +124,8 @@ public final class EngineWgsl {
 	 *     engine's own draws at the edges.</li>
 	 * <li>{@code engineLight} is beta's two-directional-light diffuse, for a program that wants to
 	 *     keep the vanilla shading term and only recolour it.</li>
+	 * <li>{@code engineTerrainLight} is the time of day, from the pair a terrain vertex carries.
+	 *     Reach it through {@link #TERRAIN_COLOR} rather than calling it directly -- see there.</li>
 	 * </ul>
 	 */
 	public static final String HELPERS = """
@@ -109,6 +144,20 @@ public final class EngineWgsl {
 
 		fn engineUv(uv : vec2<f32>) -> vec2<f32> {
 		    return select(vec2<f32>(0.0, 0.0), uv, engine.vertexFlags.z > 0.5);
+		}
+
+		/// How lit a terrain vertex is right now, from the daylight/block-floor pair it carries.
+		///
+		/// x is its luminance at full daylight -- a point ON beta's brightness curve -- so inverting
+		/// that recovers the light level behind it, fractional because smooth lighting averages four
+		/// corners. Take the ambient darkness off, put it back through the curve, and keep whichever
+		/// is brighter: that, or the light a torch gives it, which no time of day can remove.
+		fn engineTerrainLight(light : vec2<f32>) -> f32 {
+		    let above = max(light.x - 0.05, 0.0);
+		    let daylightLevel = 4.0 * above / (0.95 + 3.0 * above);
+		    let darkness = floor(engine.vertexFlags.w * (1.0 / 1024.0));
+		    let level = max(daylightLevel - darkness * (1.0 / 15.0), 0.0);
+		    return max(level / (4.0 - 3.0 * level) * 0.95 + 0.05, light.y);
 		}
 
 		/// 1 = no fog, 0 = fully fogged.

@@ -1,7 +1,9 @@
 package com.periut.retrodragon.mixin.stapi;
 
+import com.periut.retrodragon.render.Capture;
 import com.periut.retrodragon.render.QuadVertices;
 import com.periut.retrodragon.render.RetroTessellator;
+import com.periut.retrodragon.render.VertexSink;
 
 import net.minecraft.client.render.Tessellator;
 import net.modificationstation.stationapi.impl.client.render.StationTessellatorImpl;
@@ -39,10 +41,19 @@ public class StationTessellatorMixin {
 
 	@Inject(method = "quad", at = @At("RETURN"))
 	private void retroperf$collapseSplit(CallbackInfo ci) {
-		if (!QuadVertices.indexed()) {
-			// GL backend: beta's split is live, and six vertices is what the batch is meant to hold.
-			return;
+		boolean indexed = QuadVertices.indexed();
+		if (indexed) {
+			((RetroTessellator) (Object) this.self).retroperf$collapseLastQuad();
 		}
-		((RetroTessellator) (Object) this.self).retroperf$collapseLastQuad();
+		// GL backend: beta's split is live, and six vertices is what the batch is meant to hold.
+
+		// And now the quad's shape is settled, so the four corner colours BakedModelRendererMixin
+		// caught can be laid out one per vertex. Done here rather than there because only this knows
+		// whether the quad was left as four vertices or six -- and it has to be after the collapse,
+		// not at the same injection point as it, since two injectors at one point have no order.
+		VertexSink sink = Capture.sink();
+		if (sink != null) {
+			sink.flushQuadCorners(indexed);
+		}
 	}
 }

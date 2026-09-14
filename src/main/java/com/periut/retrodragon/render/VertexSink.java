@@ -52,7 +52,6 @@ public final class VertexSink {
 	 * reload replaces the table and re-meshes every section, so a section never spans two.
 	 */
 	private BlockAtlas.SpriteGrid sprites;
-	private int spriteSlot = -1;
 
 	/**
 	 * Read once per {@code begin}, not per vertex, and held for the batch.
@@ -74,6 +73,51 @@ public final class VertexSink {
 	private int normal;
 	private boolean colorDisabled;
 
+	/**
+	 * The current colour's three channels added together, before the Tessellator rounded them into
+	 * bytes, and one such value per vertex stored.
+	 *
+	 * <p>This is what {@link TerrainLight} divides one meshing pass by the other to recover a
+	 * vertex's light, and it has to be the FLOAT: the light pass packs two numbers into the
+	 * fourteen bits below a colour channel, and {@code (int)(c * 255)} keeps eight of them.
+	 *
+	 * <p>The sum rather than one channel because the blend beta applies is the same scalar in all
+	 * three, so any of them would do -- and the sum is the one that cannot be the channel a block
+	 * happens to have no colour in.
+	 */
+	private float[] colorSums = new float[512];
+	private float colorSum = 3.0F;
+	/**
+	 * Set by the float entry point, cleared by the int one it calls through to.
+	 *
+	 * <p>{@code color(float,float,float)} ends at {@code color(int,int,int,int)}, so both are seen
+	 * for one colour and the second would round the first back down to bytes. Whoever got there
+	 * first with real floats wins.
+	 */
+	private boolean colorSumFromFloat;
+	/**
+	 * Colour sums for vertices a direct writer is about to append, oldest first.
+	 *
+	 * <p>StationAPI's baked-model renderer packs its own vertices and {@code System.arraycopy}s them
+	 * into the Tessellator's {@code int[]}, so they never pass {@link #color} and the float they were
+	 * built from is gone by the time {@link #appendPacked} sees them. {@code StationTessellatorMixin}
+	 * pushes it here as each quad is written, in the order the quad lays its vertices down, and
+	 * appendPacked takes them back out one per vertex.
+	 */
+	private float[] pending = new float[64];
+	private int pendingCount;
+	private int pendingRead;
+	/** The current quad's four corner sums, before {@link #flushQuadCorners} lays them out. */
+	private final float[] quadCorner = new float[4];
+	private int quadCornerCount;
+	/**
+	 * Word index of the field the sprite size and the light pair share, or -1 when neither is
+	 * installed. Both write into it: the size at its first byte, the pair at its third and fourth.
+	 */
+	private int extraSlot = -1;
+	/** What {@link #store} leaves in the light half until {@code SectionMesher} fills it in. */
+	private int lightSeed;
+
 	public void begin(double offX, double offY, double offZ, double scale, double biasX, double biasY, double biasZ) {
 		this.pos = 0;
 		this.vertexCount = 0;
@@ -83,9 +127,12 @@ public final class VertexSink {
 		this.strideInts = TerrainVertex.strideInts(this.compact);
 		this.sprites = TerrainVertex.spriteClamp() ? BlockAtlas.spriteGrid() : null;
 		// Where the size byte goes: the compact layout's extra word, or beta's unused pad word.
-		this.spriteSlot = TerrainVertex.spriteClamp()
-			? TerrainVertex.spriteOffset(this.compact) / 4
+		this.extraSlot = TerrainVertex.spriteClamp() || TerrainLight.enabled()
+			? TerrainVertex.wordSlot(this.compact)
 			: -1;
+		// Fully lit until the light walks say otherwise, so a vertex that somehow never gets patched
+		// is too bright rather than black.
+		this.lightSeed = TerrainLight.enabled() ? TerrainLight.UNLIT_WORD : 0;
 		this.offX = offX;
 		this.offY = offY;
 		this.offZ = offZ;
@@ -96,6 +143,11 @@ public final class VertexSink {
 		this.u = this.v = 0.0F;
 		this.color = 0xFFFFFFFF;
 		this.normal = 0;
+		this.colorSum = 3.0F;
+		this.colorSumFromFloat = false;
+		this.pendingCount = 0;
+		this.pendingRead = 0;
+		this.quadCornerCount = 0;
 		this.colorDisabled = false;
 	}
 
@@ -124,10 +176,87 @@ public final class VertexSink {
 		this.colorDisabled = true;
 	}
 
+	/**
+	 * The colour as the block renderer computed it, before the Tessellator rounds it to bytes.
+	 *
+	 * <p>Recorded alongside the packed colour rather than instead of it: the bytes are still what
+	 * the vertex stores, this is only what {@link TerrainLight} needs to take the light back out of
+	 * them. Does not cancel the int path it precedes -- see {@link #colorSumFromFloat}.
+	 */
+	public void colorFloat(float r, float g, float b) {
+		if (this.colorDisabled) {
+			return;
+		}
+		this.colorSum = r + g + b;
+		this.colorSumFromFloat = true;
+	}
+
+	/**
+	 * The colour sum of one vertex a direct writer is about to append; see {@link #pending}.
+	 *
+	 * <p>Pushed rather than set, because a direct writer lays down a whole quad before anything
+	 * drains it and the four corners do not share a colour.
+	 */
+	public void pushPackedColor(float sum) {
+		if (this.pendingCount == this.pending.length) {
+			this.pending = java.util.Arrays.copyOf(this.pending, this.pending.length * 2);
+		}
+		this.pending[this.pendingCount++] = sum;
+	}
+
+	/**
+	 * One corner of the quad a direct writer is building, in the order the renderer computes them.
+	 *
+	 * <p>Separate from {@link #pushPackedColor} because a quad is four corners but is WRITTEN as
+	 * four or six vertices depending on whether the backend expands quads itself, and only the
+	 * writer knows which shape it left behind. See {@link #flushQuadCorners}.
+	 */
+	public void pushQuadCorner(float sum) {
+		if (this.quadCornerCount < this.quadCorner.length) {
+			this.quadCorner[this.quadCornerCount++] = sum;
+		}
+	}
+
+	/**
+	 * Lays the current quad's corners out in the order its vertices reached the buffer.
+	 *
+	 * @param indexed true when the writer left four vertices, false when it split them into
+	 *     v0,v1,v2,v0,v2,v3 -- the same split beta's own {@code vertex()} does
+	 */
+	public void flushQuadCorners(boolean indexed) {
+		if (this.quadCornerCount != this.quadCorner.length) {
+			// Fewer corners than a quad has: the writer took a path that does not colour per vertex,
+			// and guessing which vertices the ones we did see belong to would be worse than not
+			// lighting them. appendPacked pins them instead.
+			this.quadCornerCount = 0;
+			return;
+		}
+		if (indexed) {
+			for (float corner : this.quadCorner) {
+				pushPackedColor(corner);
+			}
+		} else {
+			pushPackedColor(this.quadCorner[0]);
+			pushPackedColor(this.quadCorner[1]);
+			pushPackedColor(this.quadCorner[2]);
+			pushPackedColor(this.quadCorner[0]);
+			pushPackedColor(this.quadCorner[2]);
+			pushPackedColor(this.quadCorner[3]);
+		}
+		this.quadCornerCount = 0;
+	}
+
 	/** Vanilla clamps then packs in native byte order; both are reproduced exactly. */
 	public void color(int r, int g, int b, int a) {
 		if (this.colorDisabled) {
 			return;
+		}
+		if (this.colorSumFromFloat) {
+			this.colorSumFromFloat = false;
+		} else {
+			// A colour that never went through the float entry point -- a content API writing a
+			// constant. It carries no light, and dividing one pass by the other will say so.
+			this.colorSum = (r + g + b) / 255.0F;
 		}
 		r = clamp(r);
 		g = clamp(g);
@@ -179,6 +308,10 @@ public final class VertexSink {
 				// leaves the normal out, which is the omission described above; copying the vertex
 				// entire is both the fix and the only spelling that survives a change of layout.
 				System.arraycopy(this.buf, from, this.buf, this.pos, stride);
+				// And the float colour beside it, which lives in its own array and is not part of the
+				// vertex the copy above moves. Without this the two duplicated corners of every quad
+				// divide to a ratio from whatever vertex last occupied the slot, and light up wrong.
+				this.colorSums[this.vertexCount] = this.colorSums[from / stride];
 				this.vertexCount++;
 				this.pos += stride;
 			}
@@ -205,6 +338,11 @@ public final class VertexSink {
 			this.v = Float.intBitsToFloat(src[p + 4]);
 			this.color = src[p + 5];
 			this.normal = src[p + 6];
+			// The float the writer built this vertex's colour from, if it told us. Without one both
+			// walks report the same sum and TerrainLight pins the vertex rather than lighting it,
+			// which is the right answer for a writer that emitted a constant.
+			this.colorSum = this.pendingRead < this.pendingCount
+				? this.pending[this.pendingRead++] : 1.0F;
 			store(Float.intBitsToFloat(src[p]) - offX,
 				Float.intBitsToFloat(src[p + 1]) - offY,
 				Float.intBitsToFloat(src[p + 2]) - offZ);
@@ -235,14 +373,18 @@ public final class VertexSink {
 			this.buf[this.pos + 5] = this.color;
 			this.buf[this.pos + 6] = this.normal;
 		}
-		if (this.spriteSlot >= 0) {
+		if (this.extraSlot >= 0) {
 			// The owning sprite's edge length, from which the shader recovers its origin. Every corner
 			// of a quad lands in the same sprite, so this is looked up per vertex rather than tracked
-			// per quad -- the sink never sees a quad boundary, and the lookup is two shifts.
+			// per quad -- the sink never sees a quad boundary, and the lookup is two shifts. The size
+			// itself, not its log: the shader wants texels, and a byte holds up to 255.
+			//
+			// The light half is a placeholder until SectionMesher fills it in: one walk alone does not
+			// know what a vertex's light is, only what its colour times its light is.
 			int size = this.sprites == null ? 0 : this.sprites.sizeAt(this.u, this.v);
-			// The size itself, not its log: the shader wants texels, and a byte holds up to 255.
-			this.buf[this.pos + this.spriteSlot] = Math.min(size, 255);
+			this.buf[this.pos + this.extraSlot] = TerrainVertex.spriteBits(size) | this.lightSeed;
 		}
+		this.colorSums[this.vertexCount] = this.colorSum;
 		this.pos += stride;
 		this.vertexCount++;
 	}
@@ -253,6 +395,19 @@ public final class VertexSink {
 	}
 
 	private void grow(int needed) {
+		// The colour sums are one per vertex against the vertex buffer's own growth, and the split
+		// writes one before store() does, so this has to cover what is about to be added as well as
+		// what is there.
+		int vertices = (this.pos + needed) / this.strideInts + 2;
+		if (vertices > this.colorSums.length) {
+			int cap = this.colorSums.length;
+			while (cap < vertices) {
+				cap <<= 1;
+			}
+			float[] sums = new float[cap];
+			System.arraycopy(this.colorSums, 0, sums, 0, this.vertexCount);
+			this.colorSums = sums;
+		}
 		if (this.pos + needed <= this.buf.length) {
 			return;
 		}
@@ -270,6 +425,13 @@ public final class VertexSink {
 		dst.clear();
 		dst.asIntBuffer().put(this.buf, 0, this.pos);
 		dst.limit(this.pos * 4);
+	}
+
+	/** The per-vertex float colour sums this batch recorded; see {@link #colorSums}. */
+	public float[] copyOutColorSums() {
+		float[] out = new float[this.vertexCount];
+		System.arraycopy(this.colorSums, 0, out, 0, this.vertexCount);
+		return out;
 	}
 
 	/** Exact-size copy, so a worker can hand off its result and keep reusing this sink. */
@@ -327,6 +489,7 @@ public final class VertexSink {
 			}
 		}
 
+		failures += checkLightLayout();
 		failures += checkAppendPacked();
 		failures += checkQuadMode();
 		failures += checkCompactPacking();
@@ -338,6 +501,103 @@ public final class VertexSink {
 		}
 		System.out.println("VertexSink self-check OK: quad split preserves the face normal"
 			+ " across all 6 vertices");
+	}
+
+	/**
+	 * The light pair: one per vertex, duplicated with the vertices the quad split duplicates, and
+	 * landing at the byte offset the pipeline declares.
+	 *
+	 * <p>The duplication is the part that can silently rot. {@link TerrainLight} recovers a vertex's
+	 * light by dividing one walk's float colour by the other's, and those floats live in their own
+	 * array rather than in the vertex -- so the {@code System.arraycopy} that re-emits v0 and v2 does
+	 * not carry them, and without the explicit copy beside it the two duplicated corners of every
+	 * quad would divide a colour by a colour from an unrelated vertex. That is not a dim face, it is
+	 * two of every six vertices lit by whatever was meshed before them.
+	 *
+	 * <p>So the four corners are given four DIFFERENT colours: equal ones would make a mismatched
+	 * copy invisible, which is the mistake that makes this class of test worthless.
+	 */
+	private static int checkLightLayout() {
+		TerrainVertex.select(true, false);
+		TerrainLight.selectForTest(true);
+		try {
+			if (!TerrainVertex.compact() || !TerrainLight.enabled()) {
+				System.out.println("VertexSink light layout SKIPPED (feature off)");
+				return 0;
+			}
+			int failures = 0;
+			VertexSink sink = new VertexSink();
+			sink.begin(0, 0, 0, 1.0, 0, 0, 0);
+			// Four corners, four colours, each through the float entry point and then the int one it
+			// calls -- exactly the order beta's Tessellator produces them in.
+			float[] corners = { 0.25F, 0.5F, 0.75F, 1.0F };
+			for (float c : corners) {
+				sink.colorFloat(c, c, c);
+				sink.color((int) (c * 255.0F), (int) (c * 255.0F), (int) (c * 255.0F), 255);
+				sink.vertex(0, 0, 0);
+			}
+
+			if (sink.strideBytes() != TerrainVertex.EXTRA_STRIDE) {
+				System.out.println("FAIL: a vertex carrying light is " + sink.strideBytes()
+					+ " bytes, expected " + TerrainVertex.EXTRA_STRIDE);
+				failures++;
+			}
+
+			// v0,v1,v2 then the copies of v0 and v2, then v3 -- the sums must follow the vertices.
+			float[] sums = sink.copyOutColorSums();
+			float[] want = { 0.75F, 1.5F, 2.25F, 0.75F, 2.25F, 3.0F };
+			if (sums.length != want.length) {
+				System.out.println("FAIL: " + sums.length + " colour sums for " + want.length
+					+ " vertices");
+				failures++;
+			} else {
+				for (int i = 0; i < want.length; i++) {
+					if (Math.abs(sums[i] - want[i]) > 1e-5) {
+						System.out.println("FAIL: vertex " + i + " colour sum " + sums[i]
+							+ ", expected " + want[i]
+							+ (i == 3 || i == 4 ? " -- the split did not carry it" : ""));
+						failures++;
+					}
+				}
+			}
+
+			// And the whole round trip, read back the way the GPU will: two unorm8s at the offset the
+			// pipeline declares, decoding to the daylight and block-floor luminance that went in.
+			float daylight = TerrainLight.luminance(11.0F / 15.0F);
+			float floor = TerrainLight.luminance(4.0F / 15.0F);
+			int[] data = sink.copyOut();
+			int stride = TerrainVertex.strideInts(true);
+			int slot = TerrainVertex.wordSlot(true);
+			data[slot] = data[slot] & ~TerrainLight.WORD_MASK
+				| TerrainLight.word(3.0F, 3.0F * daylight, 3.0F * floor);
+			ByteBuffer bytes = ByteBuffer
+				.allocateDirect(data.length * 4).order(ByteOrder.nativeOrder());
+			bytes.asIntBuffer().put(data);
+			float gotDay = (bytes.get(TerrainVertex.lightOffset(true)) & 0xFF) / 255.0F;
+			float gotFloor = (bytes.get(TerrainVertex.lightOffset(true) + 1) & 0xFF) / 255.0F;
+			if (Math.abs(gotDay - daylight) > 1.0F / 255.0F
+					|| Math.abs(gotFloor - floor) > 1.5F / 255.0F) {
+				System.out.println("FAIL: light pair read back as (" + gotDay + ", " + gotFloor
+					+ "), expected (" + daylight + ", " + floor + ")");
+				failures++;
+			}
+			// Unpatched vertices must read as fully lit, not as black.
+			if ((data[stride + slot] & TerrainLight.WORD_MASK) != TerrainLight.UNLIT_WORD) {
+				System.out.println("FAIL: an unpatched vertex holds 0x"
+					+ Integer.toHexString(data[stride + slot] & TerrainLight.WORD_MASK)
+					+ ", expected the fully lit word 0x"
+					+ Integer.toHexString(TerrainLight.UNLIT_WORD));
+				failures++;
+			}
+			if (failures == 0) {
+				System.out.println("VertexSink light layout OK: 24 bytes, one light pair per vertex,"
+					+ " duplicated with the split and decoding at the declared offset");
+			}
+			return failures;
+		} finally {
+			TerrainVertex.select(false);
+			TerrainLight.selectForTest(false);
+		}
 	}
 
 	/**
